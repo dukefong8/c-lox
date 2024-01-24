@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug core",
+      "type": "lldb",
+      "request": "custom",
+      "targetCreateCommands": [
+        "target create -c ${relativeFileDirname}/core"
+      ]
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug",
+      "cwd": "${workspaceFolder}",
+      "program": "${relativeFileDirname}/${fileBasenameNoExtension}",
+      "args": [
+        "test.lox"
+      ]
+    }
+  ]
+}

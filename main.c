@@ -83,7 +83,7 @@ int main(int argc, char* argv[]) {
   // writeChunk(&chunk, constant, 123);
   //
   // writeChunk(&chunk, OP_DIVIDE, 123);
-  // writeChunk(&chunk, OP_NAGATE, 123);
+  // writeChunk(&chunk, OP_NEGATE, 123);
   //
   // writeChunk(&chunk, OP_RETURN, 123);
   //

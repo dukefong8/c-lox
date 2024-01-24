@@ -6,6 +6,7 @@
 #include "common.h"
 #include "compiler.h"
 #include "debug.h"
+#include "parser.h"
 #include "value.h"
 
 VM vm;
@@ -36,8 +37,8 @@ static InterpretResult run() {
 #define READ_CONSTANT() (vm.chunk->constants.values[READ_BYTE()])
 #define BINARY_OP(op) \
   do {                \
-    double b = pop(); \
-    double a = pop(); \
+    Value b = pop();  \
+    Value a = pop();  \
     push(a op b);     \
   } while (false);
 
@@ -59,26 +60,28 @@ static InterpretResult run() {
         push(constant);
         break;
       }
-      case OP_ADD:
-        BINARY_OP(+);
-        break;
-      case OP_SUBTRACT:
-        BINARY_OP(-);
-        break;
-      case OP_MULTIPLY:
-        BINARY_OP(*);
-        break;
-      case OP_DIVIDE:
-        BINARY_OP(/);
-        break;
-      case OP_NAGATE:
-        push(-pop());
-        break;
-      case OP_RETURN: {
-        printValue(pop());
-        printf("\n");
-        return INTERPRET_OK;
-      }
+        /*
+        case OP_ADD:
+          BINARY_OP(+);
+          break;
+        case OP_SUBTRACT:
+          BINARY_OP(-);
+          break;
+        case OP_MULTIPLY:
+          BINARY_OP(*);
+          break;
+        case OP_DIVIDE:
+          BINARY_OP(/);
+          break;
+        case OP_NAGATE:
+          push(-pop());
+          break;
+        case OP_RETURN: {
+          printValue(pop());
+          printf("\n");
+          return INTERPRET_OK;
+        }
+        */
     }
   }
 
@@ -88,6 +91,19 @@ static InterpretResult run() {
 }
 
 InterpretResult interpret(const char* source) {
-  compile(source);
-  return INTERPRET_OK;
+  Chunk chunk;
+  initChunk(&chunk);
+
+  if (!compile(source, &chunk)) {
+    freeChunk(&chunk);
+    return INTERPRET_COMPILE_ERROR;
+  }
+
+  vm.chunk = &chunk;
+  vm.ip = vm.chunk->code;
+
+  InterpretResult result = run();
+
+  freeChunk(&chunk);
+  return result;
 }

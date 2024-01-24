@@ -1,4 +1,4 @@
-EXE = lox
+EXE = main
 BUILD_DIR := ./build
 
 SRCS := $(shell find . -name '*.c')
