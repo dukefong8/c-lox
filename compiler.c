@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <value.h>
 
 #include "common.h"
 #include "parser.h"
@@ -35,7 +36,7 @@ typedef struct {
   Precedence precedence;
 } ParseRule;
 
-Parser parser;
+static Parser parser;
 
 Chunk* compilingChunk;
 
@@ -125,7 +126,7 @@ static void endCompiler() {
 
 static void number() {
   double value = strtod(parser.previous.start, NULL);
-  emitConstant(value);
+  emitConstant(NUMBER_VAL(value));
 }
 
 static ParseRule* getRule(TokenType type);

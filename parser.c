@@ -8,7 +8,7 @@
 #include "scanner.h"
 #include "value.h"
 
-Parser parser;
+static Parser parser;
 
 static Token peek() {
   return parser.current;
@@ -259,6 +259,7 @@ Expr* unary() {
 /*
   primary      → NUMBER | STRING | "true" | "false" | "nil"
                | "(" expression ")" ;
+ */
 Expr* primary() {
   if (match1(TOKEN_FALSE)) return New(Expr, Literal(BOOL_VAL(false)));
   if (match1(TOKEN_TRUE)) return New(Expr, Literal(BOOL_VAL(true)));
@@ -278,6 +279,5 @@ Expr* primary() {
 
   assert(!"primary");
 }
- */
 
 #endif
