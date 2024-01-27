@@ -2,11 +2,9 @@
 #define clox_parser_h
 
 #include <datatype99.h>
+#include <stdbool.h>
 
 #include "scanner.h"
-#include "value.h"
-
-void parse(const char* source);
 
 typedef struct {
   Token current;
@@ -20,7 +18,7 @@ typedef struct {
 
 datatype(
   Expr,
-  (Literal, Value),
+  (Literal, Token),
   (Assign, Token, Expr*),
   (Unary, Token, Expr*),
   (Binary, Expr*, Token, Expr*),
@@ -35,5 +33,7 @@ datatype(
 
 #endif // _CLANGD
 // clang-format on
+
+Expr* parse(const char* source);
 
 #endif  // clox_parser_h

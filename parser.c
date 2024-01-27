@@ -46,7 +46,7 @@ static void errorAtCurrent(const char* message) {
   errorAt(&parser.current, message);
 }
 
-static Token advance() {
+static void advance() {
   parser.previous = parser.current;
 
   for (;;) {
@@ -72,7 +72,7 @@ static bool match1(TokenType tt) {
 }
 
 static bool matchany(const TokenType* types) {
-  for (TokenType type = *types; *types; type++) {
+  for (TokenType type = *types; *types; types++) {
     if (check(type)) {
       advance();
       return true;
@@ -82,11 +82,13 @@ static bool matchany(const TokenType* types) {
   return false;
 }
 
-static Token expect(TokenType type, const char* message) {
-  if (check(type)) return advance();
+static void consume(TokenType type, const char* message) {
+  if (parser.current.type == type) {
+    advance();
+    return;
+  }
 
-  assert(!message);
-  return (Token){0};
+  errorAtCurrent(message);
 }
 
 #define New(Type, Value)                        \
@@ -109,24 +111,15 @@ Expr* factor();
 Expr* unary();
 Expr* primary();
 
-void parse(const char* source) {
+Expr* parse(const char* source) {
   initScanner(source);
-  parser.current = scanToken();
+  parser.hadError = false;
+  parser.panicMode = false;
+
+  advance();
   Expr* expr = expression();
-  match(*expr) {
-    of(Literal, _) {
-      puts("Literal");
-    }
-    of(Grouping, _) {
-      puts("Grouping");
-    }
-    of(Unary, _, _) {
-    }
-    of(Assign, _, _) {
-    }
-    of(Binary, _, _, _) {
-    }
-  }
+  consume(TOKEN_EOF, "Expect end of expression.");
+  return expr;
 }
 
 /*
@@ -142,7 +135,8 @@ Expr* expression() {
  */
 Expr* assignment() {
   if (current().type == TOKEN_IDENTIFIER && peek().type == TOKEN_EQUAL) {
-    Token name = advance();
+    Token name = current();
+    // skip '='
     advance();
     Expr* expr = assignment();
     return New(Expr, Assign(name, expr));
@@ -187,7 +181,7 @@ Expr* logic_and() {
 Expr* equality() {
   Expr* expr = comparision();
 
-  while (matchany((TokenType[]){TOKEN_BANG_EQUAL, TOKEN_EQUAL_EQUAL})) {
+  while (matchany((TokenType[]){TOKEN_BANG_EQUAL, TOKEN_EQUAL_EQUAL, 0})) {
     Token op = current();
     Expr* right = comparision();
     expr = New(Expr, Binary(expr, op, right));
@@ -203,7 +197,7 @@ Expr* comparision() {
   Expr* expr = term();
 
   while (
-    matchany((TokenType[]){TOKEN_GREATER, TOKEN_GREATER_EQUAL, TOKEN_LESS, TOKEN_LESS_EQUAL})) {
+    matchany((TokenType[]){TOKEN_GREATER, TOKEN_GREATER_EQUAL, TOKEN_LESS, TOKEN_LESS_EQUAL, 0})) {
     Token op = current();
     Expr* right = term();
     expr = New(Expr, Binary(expr, op, right));
@@ -218,7 +212,7 @@ Expr* comparision() {
 Expr* term() {
   Expr* expr = factor();
 
-  while (matchany((TokenType[]){TOKEN_MINUS, TOKEN_PLUS})) {
+  while (matchany((TokenType[]){TOKEN_MINUS, TOKEN_PLUS, 0})) {
     Token op = current();
     Expr* right = factor();
     expr = New(Expr, Binary(expr, op, right));
@@ -233,7 +227,7 @@ Expr* term() {
 Expr* factor() {
   Expr* expr = unary();
 
-  while (matchany((TokenType[]){TOKEN_SLASH, TOKEN_STAR})) {
+  while (matchany((TokenType[]){TOKEN_SLASH, TOKEN_STAR, 0})) {
     Token op = current();
     Expr* right = unary();
     expr = New(Expr, Binary(expr, op, right));
@@ -261,23 +255,14 @@ Expr* unary() {
                | "(" expression ")" ;
  */
 Expr* primary() {
-  if (match1(TOKEN_FALSE)) return New(Expr, Literal(BOOL_VAL(false)));
-  if (match1(TOKEN_TRUE)) return New(Expr, Literal(BOOL_VAL(true)));
-  if (match1(TOKEN_NIL)) return New(Expr, Literal(NIL_VAL));
-
-  if (match1(TOKEN_NUMBER)) {
-  }
-
-  if (match1(TOKEN_STRING)) {
-  }
-
   if (match1(TOKEN_LEFT_PAREN)) {
     Expr* expr = expression();
-    expect(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
     return New(Expr, Grouping(expr));
   }
 
-  assert(!"primary");
+  advance();
+  return New(Expr, Literal(current()));
 }
 
 #endif
