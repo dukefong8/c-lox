@@ -1,12 +1,10 @@
 #include "parser.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "common.h"
 #include "scanner.h"
-#include "value.h"
 
 static Parser parser;
 
@@ -14,7 +12,7 @@ static Token peek() {
   return parser.current;
 }
 
-static Token current() {
+static Token previous() {
   return parser.previous;
 }
 
@@ -58,12 +56,11 @@ static void advance() {
 }
 
 static bool check(TokenType type) {
-  if (isAtEnd()) return false;
   return peek().type == type;
 }
 
-static bool match1(TokenType tt) {
-  if (check(tt)) {
+static bool match1(TokenType type) {
+  if (check(type)) {
     advance();
     return true;
   }
@@ -72,8 +69,8 @@ static bool match1(TokenType tt) {
 }
 
 static bool matchany(const TokenType* types) {
-  for (TokenType type = *types; *types; types++) {
-    if (check(type)) {
+  while (*types) {
+    if (check(*types++)) {
       advance();
       return true;
     }
@@ -82,8 +79,8 @@ static bool matchany(const TokenType* types) {
   return false;
 }
 
-static void consume(TokenType type, const char* message) {
-  if (parser.current.type == type) {
+static void expect(TokenType type, const char* message) {
+  if (check(type)) {
     advance();
     return;
   }
@@ -118,7 +115,7 @@ Expr* parse(const char* source) {
 
   advance();
   Expr* expr = expression();
-  consume(TOKEN_EOF, "Expect end of expression.");
+  expect(TOKEN_EOF, "Expect end of expression.");
   return expr;
 }
 
@@ -130,19 +127,19 @@ Expr* expression() {
 }
 
 /*
-  assignment    → IDENTIFIER "=" assignment
+  assignment   → IDENTIFIER "=" assignment
                | logic_or ;
  */
 Expr* assignment() {
-  if (current().type == TOKEN_IDENTIFIER && peek().type == TOKEN_EQUAL) {
-    Token name = current();
-    // skip '='
-    advance();
-    Expr* expr = assignment();
-    return New(Expr, Assign(name, expr));
+  Expr* expr = logic_or();
+
+  if (match1(TOKEN_EQUAL)) {
+    Token name = previous();
+    Expr* value = assignment();
+    return New(Expr, Assign(name, value));
   }
 
-  return logic_or();
+  return expr;
 }
 
 /*
@@ -152,9 +149,9 @@ Expr* logic_or() {
   Expr* expr = logic_and();
 
   while (match1(TOKEN_OR)) {
-    Token op = current();
+    Token op = previous();
     Expr* right = logic_and();
-    expr = New(Expr, Binary(expr, op, right));
+    expr = New(Expr, Logical(expr, op, right));
   }
 
   return expr;
@@ -167,9 +164,9 @@ Expr* logic_and() {
   Expr* expr = equality();
 
   while (match1(TOKEN_AND)) {
-    Token op = current();
+    Token op = previous();
     Expr* right = equality();
-    expr = New(Expr, Binary(expr, op, right));
+    expr = New(Expr, Logical(expr, op, right));
   }
 
   return expr;
@@ -182,7 +179,7 @@ Expr* equality() {
   Expr* expr = comparision();
 
   while (matchany((TokenType[]){TOKEN_BANG_EQUAL, TOKEN_EQUAL_EQUAL, 0})) {
-    Token op = current();
+    Token op = previous();
     Expr* right = comparision();
     expr = New(Expr, Binary(expr, op, right));
   }
@@ -198,7 +195,7 @@ Expr* comparision() {
 
   while (
     matchany((TokenType[]){TOKEN_GREATER, TOKEN_GREATER_EQUAL, TOKEN_LESS, TOKEN_LESS_EQUAL, 0})) {
-    Token op = current();
+    Token op = previous();
     Expr* right = term();
     expr = New(Expr, Binary(expr, op, right));
   }
@@ -213,7 +210,7 @@ Expr* term() {
   Expr* expr = factor();
 
   while (matchany((TokenType[]){TOKEN_MINUS, TOKEN_PLUS, 0})) {
-    Token op = current();
+    Token op = previous();
     Expr* right = factor();
     expr = New(Expr, Binary(expr, op, right));
   }
@@ -228,7 +225,7 @@ Expr* factor() {
   Expr* expr = unary();
 
   while (matchany((TokenType[]){TOKEN_SLASH, TOKEN_STAR, 0})) {
-    Token op = current();
+    Token op = previous();
     Expr* right = unary();
     expr = New(Expr, Binary(expr, op, right));
   }
@@ -242,7 +239,7 @@ Expr* factor() {
  */
 Expr* unary() {
   if (matchany((TokenType[]){TOKEN_BANG, TOKEN_MINUS, 0})) {
-    Token op = current();
+    Token op = previous();
     Expr* right = unary();
     return New(Expr, Unary(op, right));
   }
@@ -257,12 +254,12 @@ Expr* unary() {
 Expr* primary() {
   if (match1(TOKEN_LEFT_PAREN)) {
     Expr* expr = expression();
-    consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
+    expect(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
     return New(Expr, Grouping(expr));
   }
 
   advance();
-  return New(Expr, Literal(current()));
+  return New(Expr, Literal(previous()));
 }
 
 #endif

@@ -50,6 +50,7 @@ static void runFile(const char* path) {
   char* source = readFile(path);
   InterpretResult result = interpret(source);
   Expr* expr = parse(source);
+  printExpr(expr);
   free(source);
 
   if (result == INTERPRET_COMPILE_ERROR) exit(65);
