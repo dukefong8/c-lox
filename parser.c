@@ -134,9 +134,12 @@ Expr* assignment() {
   Expr* expr = logic_or();
 
   if (match1(TOKEN_EQUAL)) {
-    Token name = previous();
-    Expr* value = assignment();
-    return New(Expr, Assign(name, value));
+    match(*expr) {
+      of(Variable, name) {
+        Expr* value = assignment();
+        return New(Expr, Assign(*name, value));
+      }
+    }
   }
 
   return expr;
@@ -248,7 +251,7 @@ Expr* unary() {
 }
 
 /*
-  primary      → NUMBER | STRING | "true" | "false" | "nil"
+  primary      → NUMBER | STRING | IDENTIFIER | "true" | "false" | "nil"
                | "(" expression ")" ;
  */
 Expr* primary() {
@@ -256,6 +259,10 @@ Expr* primary() {
     Expr* expr = expression();
     expect(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
     return New(Expr, Grouping(expr));
+  }
+
+  if (match1(TOKEN_IDENTIFIER)) {
+    return New(Expr, Variable(previous()));
   }
 
   advance();
