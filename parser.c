@@ -16,10 +16,6 @@ static Token previous() {
   return parser.previous;
 }
 
-static bool isAtEnd() {
-  return peek().type == TOKEN_EOF;
-}
-
 static void errorAt(Token* token, const char* message) {
   if (parser.panicMode) return;
   parser.panicMode = true;
@@ -139,6 +135,7 @@ Expr* assignment() {
         Expr* value = assignment();
         return New(Expr, Assign(*name, value));
       }
+      otherwise error("Expect identifier");
     }
   }
 
@@ -269,4 +266,5 @@ Expr* primary() {
   return New(Expr, Literal(previous()));
 }
 
+#undef New
 #endif

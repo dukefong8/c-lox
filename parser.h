@@ -23,8 +23,8 @@ datatype(Expr,
   (Grouping, Expr*),
   (Assign, Token, Expr*),
   (Unary, Token, Expr*),
-  (Logical, Expr*, Token, Expr*),
-  (Binary, Expr*, Token, Expr*)
+  (Binary, Expr*, Token, Expr*),
+  (Logical, Expr*, Token, Expr*)
 );
 
 datatype(Stmt,
