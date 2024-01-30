@@ -208,7 +208,7 @@ static void binary() {
       emitByte(OP_DIVIDE);
       break;
     default:
-      return;  // Unreachable.
+      assert(0);  // Unreachable.
   }
 }
 

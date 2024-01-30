@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "common.h"
+#include "debug.h"
 #include "scanner.h"
 
 static Parser parser;
@@ -30,6 +31,7 @@ static void errorAt(Token* token, const char* message) {
 
   fprintf(stderr, ": %s\n", message);
   parser.hadError = true;
+  breakpoint();
 }
 
 static void error(const char* message) {
@@ -44,6 +46,7 @@ static void advance() {
   parser.previous = parser.current;
 
   for (;;) {
+    asm("a1:");
     parser.current = scanToken();
     if (parser.current.type != TOKEN_ERROR) break;
 

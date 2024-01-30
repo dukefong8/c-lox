@@ -8,7 +8,7 @@ DEPS := $(OBJS:.o=.d)
 WARN = -Wall -Wextra -Wno-unused-parameter -Wno-unused-function 
 SANZ = -fsanitize=undefined
 
-CPPFLAGS += -MMD -MP
+CPPFLAGS += -MMD -MP -I.
 CFLAGS += $(WARN) $(SANZ) -g3 -fno-omit-frame-pointer
 LDFLAGS += $(SANZ)
 
