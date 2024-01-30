@@ -6,9 +6,11 @@ OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(OBJS:.o=.d)
 
 WARN = -Wall -Wextra -Wno-unused-parameter -Wno-unused-function 
+SANZ = -fsanitize=undefined
 
-CFLAGS += $(WARN) -g3 -fno-omit-frame-pointer
 CPPFLAGS += -MMD -MP
+CFLAGS += $(WARN) $(SANZ) -g3 -fno-omit-frame-pointer
+LDFLAGS += $(SANZ)
 
 .PHONY: all
 all: $(EXE)
@@ -19,7 +21,7 @@ clean:
 
 .PHONY: watch
 watch:
-	fd -ec -eh | entr -cc clang $(WARN) -fsyntax-only -ferror-limit=1 -fmacro-backtrace-limit=1 /_
+	find -name '*.c' -o -name '*.h' | entr -cc clang $(WARN) -fsyntax-only -ferror-limit=1 -fmacro-backtrace-limit=1 /_
 
 $(EXE): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
