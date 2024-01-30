@@ -39,11 +39,7 @@ static void printExpr(Expr* expr) {
   match(*expr) {
     of(Literal, token) printf("%.*s", token->length, token->start);
     of(Variable, token) printf("%.*s", token->length, token->start);
-    of(Grouping, expr) {
-      printf("(");
-      printExpr(*expr);
-      printf(")");
-    }
+    of(Grouping, expr) printExpr(*expr);
     of(Assign, var, expr) {
       printf("%.*s = ", var->length, var->start);
       printExpr(*expr);
@@ -53,14 +49,20 @@ static void printExpr(Expr* expr) {
       printExpr(*expr);
     }
     of(Binary, left, op, right) {
+      printf("(");
+      printf("%.*s ", op->length, op->start);
       printExpr(*left);
-      printf(" %.*s ", op->length, op->start);
+      printf(" ");
       printExpr(*right);
+      printf(")");
     }
     of(Logical, left, op, right) {
-      printExpr(*left);
+      printf("(");
       printf(" %.*s ", op->length, op->start);
+      printExpr(*left);
+      printf(" ");
       printExpr(*right);
+      printf(")");
     }
   }
 }
