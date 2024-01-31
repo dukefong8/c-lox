@@ -96,18 +96,51 @@ static void expect(TokenType type, const char* message) {
 
 #ifndef _CLANGD
 
-Expr* expression();
-Expr* assignment();
-Expr* logic_or();
-Expr* logic_and();
-Expr* equality();
-Expr* comparision();
-Expr* term();
-Expr* factor();
-Expr* unary();
-Expr* primary();
+static void printExpr(Expr* expr) {
+  match(*expr) {
+    of(Literal, token) printf("%.*s", token->length, token->start);
+    of(Variable, token) printf("%.*s", token->length, token->start);
+    of(Grouping, expr) printExpr(*expr);
+    of(Assign, var, expr) {
+      printf("%.*s = ", var->length, var->start);
+      printExpr(*expr);
+    }
+    of(Unary, op, expr) {
+      printf("%.*s", op->length, op->start);
+      printExpr(*expr);
+    }
+    of(Binary, left, op, right) {
+      printf("(");
+      printf("%.*s ", op->length, op->start);
+      printExpr(*left);
+      printf(" ");
+      printExpr(*right);
+      printf(")");
+    }
+    of(Logical, left, op, right) {
+      printf("(");
+      printf(" %.*s ", op->length, op->start);
+      printExpr(*left);
+      printf(" ");
+      printExpr(*right);
+      printf(")");
+    }
+  }
+}
 
-Expr* parse(const char* source) {
+static Stmt* statement();
+static Expr* expression();
+static Expr* assignment();
+static Expr* logic_or();
+static Expr* logic_and();
+static Expr* equality();
+static Expr* comparision();
+static Expr* term();
+static Expr* factor();
+static Expr* unary();
+static Expr* primary();
+
+void parse(const char* source) {
   initScanner(source);
   parser.hadError = false;
   parser.panicMode = false;
@@ -115,21 +148,41 @@ Expr* parse(const char* source) {
   advance();
   Expr* expr = expression();
   expect(TOKEN_EOF, "Expect end of expression.");
-  return expr;
+  printExpr(expr);
 }
 
 /*
   expression   → assignment ;
  */
-Expr* expression() {
+static Expr* expression() {
   return assignment();
+}
+
+static Stmt* printStatement() {
+  Expr* expr = expression();
+  expect(TOKEN_SEMICOLON, "Expect ';' after value.");
+  return New(Stmt, Print(expr));
+}
+
+static Stmt* expressionStatement() {
+  Expr* expr = expression();
+  expect(TOKEN_SEMICOLON, "Expect ';' after value.");
+  return New(Stmt, Expression(expr));
+}
+
+static Stmt* statement() {
+  if (match1(TOKEN_PRINT)) {
+    return printStatement();
+  }
+
+  return expressionStatement();
 }
 
 /*
   assignment   → IDENTIFIER "=" assignment
                | logic_or ;
  */
-Expr* assignment() {
+static Expr* assignment() {
   Expr* expr = logic_or();
 
   if (match1(TOKEN_EQUAL)) {
@@ -148,7 +201,7 @@ Expr* assignment() {
 /*
   logic_or      → logic_and ( "or" logic_and )* ;
  */
-Expr* logic_or() {
+static Expr* logic_or() {
   Expr* expr = logic_and();
 
   while (match1(TOKEN_OR)) {
@@ -163,7 +216,7 @@ Expr* logic_or() {
 /*
   logic_and      → equality ( "and" equality )* ;
  */
-Expr* logic_and() {
+static Expr* logic_and() {
   Expr* expr = equality();
 
   while (match1(TOKEN_AND)) {
@@ -178,7 +231,7 @@ Expr* logic_and() {
 /*
   equality      → comparison ( ( "!=" | "==" ) comparison )* ;
  */
-Expr* equality() {
+static Expr* equality() {
   Expr* expr = comparision();
 
   while (matchany((TokenType[]){TOKEN_BANG_EQUAL, TOKEN_EQUAL_EQUAL, 0})) {
@@ -193,7 +246,7 @@ Expr* equality() {
 /*
   comparison     → term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
  */
-Expr* comparision() {
+static Expr* comparision() {
   Expr* expr = term();
 
   while (
@@ -209,7 +262,7 @@ Expr* comparision() {
 /*
   term          → factor ( ( "-" | "+" ) factor )* ;
  */
-Expr* term() {
+static Expr* term() {
   Expr* expr = factor();
 
   while (matchany((TokenType[]){TOKEN_MINUS, TOKEN_PLUS, 0})) {
@@ -224,7 +277,7 @@ Expr* term() {
 /*
  factor         → unary ( ( "/" | "*" ) unary )* ;
  */
-Expr* factor() {
+static Expr* factor() {
   Expr* expr = unary();
 
   while (matchany((TokenType[]){TOKEN_SLASH, TOKEN_STAR, 0})) {
@@ -240,7 +293,7 @@ Expr* factor() {
   unary        → ( "!" | "-" ) unary
                | primary ;
  */
-Expr* unary() {
+static Expr* unary() {
   if (matchany((TokenType[]){TOKEN_BANG, TOKEN_MINUS, 0})) {
     Token op = previous();
     Expr* right = unary();
@@ -254,7 +307,7 @@ Expr* unary() {
   primary      → NUMBER | STRING | IDENTIFIER | "true" | "false" | "nil"
                | "(" expression ")" ;
  */
-Expr* primary() {
+static Expr* primary() {
   if (match1(TOKEN_LEFT_PAREN)) {
     Expr* expr = expression();
     expect(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
