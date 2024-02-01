@@ -2,9 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "chunk.h"
 #include "common.h"
-#include "debug.h"
 #include "parser.h"
 #include "vm.h"
 
