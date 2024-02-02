@@ -9,14 +9,6 @@
 
 static Parser parser;
 
-static Token peek() {
-  return parser.current;
-}
-
-static Token previous() {
-  return parser.previous;
-}
-
 static void errorAt(Token* token, const char* message) {
   if (parser.panicMode) return;
   parser.panicMode = true;
@@ -42,20 +34,28 @@ static void errorAtCurrent(const char* message) {
   errorAt(&parser.current, message);
 }
 
+static Token peek() {
+  return parser.current;
+}
+
+static Token previous() {
+  return parser.previous;
+}
+
+static bool check(TokenType type) {
+  return peek().type == type;
+}
+
 static void advance() {
   parser.previous = parser.current;
 
   for (;;) {
     asm("a1:");
     parser.current = scanToken();
-    if (parser.current.type != TOKEN_ERROR) break;
+    if (!check(TOKEN_ERROR)) break;
 
     errorAtCurrent(parser.current.start);
   }
-}
-
-static bool check(TokenType type) {
-  return peek().type == type;
 }
 
 static bool match1(TokenType type) {
@@ -78,7 +78,7 @@ static bool matchany(const TokenType* types) {
   return false;
 }
 
-static void expect(TokenType type, const char* message) {
+static void consume(TokenType type, const char* message) {
   if (check(type)) {
     advance();
     return;
@@ -148,7 +148,7 @@ void parse(const char* source) {
 
   advance();
   Expr* expr = expression();
-  expect(TOKEN_EOF, "Expect end of expression.");
+  consume(TOKEN_EOF, "Expect end of expression.");
   printExpr(expr);
 }
 
@@ -160,7 +160,7 @@ static Expr* expression() {
 // printStmt      → "print" expression ";" ;
 static Stmt* printStatement() {
   Expr* expr = expression();
-  expect(TOKEN_SEMICOLON, "Expect ';' after value.");
+  consume(TOKEN_SEMICOLON, "Expect ';' after value.");
   return New(Stmt, Print(expr));
 }
 
@@ -172,15 +172,15 @@ static Stmt* returnStatement() {
     value = expression();
   }
 
-  expect(TOKEN_SEMICOLON, "Expect ';' after return value.");
+  consume(TOKEN_SEMICOLON, "Expect ';' after return value.");
   return New(Stmt, Return(keyword, value));
 }
 
 // whileStmt      → "while" "(" expression ")" statement ;
 static Stmt* whileStatement() {
-  expect(TOKEN_LEFT_PAREN, "Expect '(' after while.");
+  consume(TOKEN_LEFT_PAREN, "Expect '(' after while.");
   Expr* cond = expression();
-  expect(TOKEN_LEFT_PAREN, "Expect ')' after condition.");
+  consume(TOKEN_LEFT_PAREN, "Expect ')' after condition.");
   Stmt* body = statement();
   return New(Stmt, While(cond, body));
 }
@@ -188,7 +188,7 @@ static Stmt* whileStatement() {
 // exprStmt       → expression ";" ;
 static Stmt* expressionStatement() {
   Expr* expr = expression();
-  expect(TOKEN_SEMICOLON, "Expect ';' after value.");
+  consume(TOKEN_SEMICOLON, "Expect ';' after value.");
   return New(Stmt, Expression(expr));
 }
 
@@ -333,7 +333,7 @@ static Expr* call() {
     if (match1(TOKEN_LEFT_PAREN)) {
       // TODO: return callArguments(expr);
     } else if (match1(TOKEN_DOT)) {
-      expect(TOKEN_IDENTIFIER, "Expect field name after '.'.");
+      consume(TOKEN_IDENTIFIER, "Expect field name after '.'.");
       expr = New(Expr, Get(expr, previous()));
     } else
       break;
@@ -364,18 +364,19 @@ static Expr* primary() {
 
   if (match1(TOKEN_LEFT_PAREN)) {
     Expr* expr = expression();
-    expect(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
     return New(Expr, Grouping(expr));
   }
 
   if (match1(TOKEN_SUPER)) {
     Token keyword = previous();
-    expect(TOKEN_DOT, "Expect . after super");
-    expect(TOKEN_IDENTIFIER, "Expect identifier");
+    consume(TOKEN_DOT, "Expect . after super");
+    consume(TOKEN_IDENTIFIER, "Expect identifier");
     return New(Expr, Super(keyword, previous()));
   }
 
   errorAtCurrent("Expect expression.");
+  return NULL;  // Unreachable;
 }
 
 #undef New
