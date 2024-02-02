@@ -98,7 +98,7 @@ static void expect(TokenType type, const char* message) {
 
 static void printExpr(Expr* expr) {
   match(*expr) {
-    of(Literal, token) printf("%.*s", token->length, token->start);
+    of(Literal, value) printValue(*value);
     of(Variable, token) printf("%.*s", token->length, token->start);
     of(Grouping, expr) printExpr(*expr);
     of(Assign, var, expr) {
@@ -138,6 +138,7 @@ static Expr* comparision();
 static Expr* term();
 static Expr* factor();
 static Expr* unary();
+static Expr* call();
 static Expr* primary();
 
 void parse(const char* source) {
@@ -151,19 +152,40 @@ void parse(const char* source) {
   printExpr(expr);
 }
 
-/*
-  expression   → assignment ;
- */
+//  expression   → assignment ;
 static Expr* expression() {
   return assignment();
 }
 
+// printStmt      → "print" expression ";" ;
 static Stmt* printStatement() {
   Expr* expr = expression();
   expect(TOKEN_SEMICOLON, "Expect ';' after value.");
   return New(Stmt, Print(expr));
 }
 
+// returnStmt     → "return" expression? ";" ;
+static Stmt* returnStatement() {
+  Token keyword = previous();
+  Expr* value = NULL;
+  if (!check(TOKEN_SEMICOLON)) {
+    value = expression();
+  }
+
+  expect(TOKEN_SEMICOLON, "Expect ';' after return value.");
+  return New(Stmt, Return(keyword, value));
+}
+
+// whileStmt      → "while" "(" expression ")" statement ;
+static Stmt* whileStatement() {
+  expect(TOKEN_LEFT_PAREN, "Expect '(' after while.");
+  Expr* cond = expression();
+  expect(TOKEN_LEFT_PAREN, "Expect ')' after condition.");
+  Stmt* body = statement();
+  return New(Stmt, While(cond, body));
+}
+
+// exprStmt       → expression ";" ;
 static Stmt* expressionStatement() {
   Expr* expr = expression();
   expect(TOKEN_SEMICOLON, "Expect ';' after value.");
@@ -171,9 +193,9 @@ static Stmt* expressionStatement() {
 }
 
 static Stmt* statement() {
-  if (match1(TOKEN_PRINT)) {
-    return printStatement();
-  }
+  if (match1(TOKEN_PRINT)) return printStatement();
+  if (match1(TOKEN_RETURN)) return returnStatement();
+  if (match1(TOKEN_WHILE)) return whileStatement();
 
   return expressionStatement();
 }
@@ -300,7 +322,24 @@ static Expr* unary() {
     return New(Expr, Unary(op, right));
   }
 
-  return primary();
+  return call();
+}
+
+// call       → primary ( "(" arguments? ")" | "." IDENTIFIER )* ;
+static Expr* call() {
+  Expr* expr = primary();
+
+  for (;;) {
+    if (match1(TOKEN_LEFT_PAREN)) {
+      // TODO: return callArguments(expr);
+    } else if (match1(TOKEN_DOT)) {
+      expect(TOKEN_IDENTIFIER, "Expect field name after '.'.");
+      expr = New(Expr, Get(expr, previous()));
+    } else
+      break;
+  }
+
+  return expr;
 }
 
 /*
@@ -308,18 +347,35 @@ static Expr* unary() {
                | "(" expression ")" ;
  */
 static Expr* primary() {
+  if (match1(TOKEN_NIL)) return New(Expr, Literal(NIL_VAL));
+  if (match1(TOKEN_TRUE)) return New(Expr, Literal(BOOL_VAL(true)));
+  if (match1(TOKEN_FALSE)) return New(Expr, Literal(BOOL_VAL(false)));
+
+  if (match1(TOKEN_NUMBER)) {
+    double number = strtod(previous().start, NULL);
+    return New(Expr, Literal(NUMBER_VAL(number)));
+  }
+
+  // TODO: STRING
+
+  if (match1(TOKEN_IDENTIFIER)) {
+    return New(Expr, Variable(previous()));
+  }
+
   if (match1(TOKEN_LEFT_PAREN)) {
     Expr* expr = expression();
     expect(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
     return New(Expr, Grouping(expr));
   }
 
-  if (match1(TOKEN_IDENTIFIER)) {
-    return New(Expr, Variable(previous()));
+  if (match1(TOKEN_SUPER)) {
+    Token keyword = previous();
+    expect(TOKEN_DOT, "Expect . after super");
+    expect(TOKEN_IDENTIFIER, "Expect identifier");
+    return New(Expr, Super(keyword, previous()));
   }
 
-  advance();
-  return New(Expr, Literal(previous()));
+  errorAtCurrent("Expect expression.");
 }
 
 #undef New
