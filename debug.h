@@ -7,7 +7,7 @@
 #ifdef GDB
 #define breakpoint() asm("int3; nop")
 #else
-#define breakpoint() (void)0;
+#define breakpoint() (void)0
 #endif
 
 #include "chunk.h"
