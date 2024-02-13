@@ -1,6 +1,7 @@
 #include "value.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "memory.h"
 #include "object.h"
@@ -53,6 +54,12 @@ bool valuesEqual(Value a, Value b) {
       return true;
     case VAL_NUMBER:
       return AS_NUMBER(a) == AS_NUMBER(b);
+    case VAL_OBJ: {
+      ObjString* aString = AS_STRING(a);
+      ObjString* bString = AS_STRING(b);
+      return aString->length == bString->length &&
+             memcmp(aString->chars, bString->chars, aString->length) == 0;
+    }
     default:
       return false;  // Unreachable.
   }
