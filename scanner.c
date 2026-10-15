@@ -78,9 +78,9 @@ static void skipWhitespace() {
         advance();
         break;
       case '/':
-        // why cannot use peek() == '/' here?
         if (peekNext() == '/') {
-          while (peek() != '\n' && isAtEnd()) advance();
+          // A comment goes until the end of the line.
+          while (peek() != '\n' && !isAtEnd()) advance();
         } else {
           return;
         }

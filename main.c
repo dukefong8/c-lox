@@ -1,7 +1,11 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include <arena.h>
+
+#include "cgen.h"
 #include "common.h"
 #include "parser.h"
 #include "vm.h"
@@ -54,15 +58,51 @@ static void runFile(const char* path) {
   if (result == INTERPRET_RUNTIME_ERROR) exit(70);
 }
 
+static void emitCFile(const char* path) {
+  char* source = readFile(path);
+
+  byte* buf = malloc(MB(16));
+  if (buf == NULL) {
+    fprintf(stderr, "Out of memory.\n");
+    exit(1);
+  }
+  Arena arena = arena_init(buf, MB(16));
+
+  jmp_buf oom;
+  if (ArenaOOM(&arena, oom)) {
+    fprintf(stderr, "Out of memory.\n");
+    exit(1);
+  }
+
+  int exitCode = 0;
+  ParseResult pres = parseProgram(&arena, source);
+  if (pres.hadError) {
+    exitCode = 65;
+  } else {
+    CgenResult cres = cgen_compile(&arena, pres.statements);
+    if (!cres.ok) {
+      exitCode = 65;
+    } else {
+      fwrite(cres.code.data, 1, (size_t)cres.code.len, stdout);
+    }
+  }
+
+  free(source);
+  free(buf);
+  if (exitCode != 0) exit(exitCode);
+}
+
 int main(int argc, char* argv[]) {
   initVM();
 
   if (argc == 1) {
     repl();
+  } else if (argc == 3 && strcmp(argv[1], "--emit-c") == 0) {
+    emitCFile(argv[2]);
   } else if (argc == 2) {
     runFile(argv[1]);
   } else {
-    fprintf(stderr, "Usage: clox [path]\n");
+    fprintf(stderr, "Usage: clox [path] [--emit-c path]\n");
   }
 
   freeVM();

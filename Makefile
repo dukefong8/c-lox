@@ -8,7 +8,7 @@ DEPS := $(OBJS:.o=.d)
 WARN = -Wall -Wextra -Wno-unused-parameter -Wno-unused-function 
 SANZ = -fsanitize=undefined
 
-CPPFLAGS += -MMD -MP -I.
+CPPFLAGS += -MMD -MP -I. -I/home/duke/dev/ModernC/include
 CFLAGS += $(WARN) $(SANZ) -g3 -fno-omit-frame-pointer
 LDFLAGS += $(SANZ)
 

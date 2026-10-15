@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE: c-lox AST→C pass pipeline demo</title>
+<!--
+  PROTOTYPE (throwaway) — answers: does the nanopass decomposition
+  check-core → resolve-scopes → lower-logical → emit-c handle Lox's
+  awkward cases and yield semantics-preserving C?
+  The PASS MODULE below is the liftable part (mirrors future cgen.c
+  contracts). This page shell is throwaway. Do not ship to production.
+-->
+<style>
+  body { font-family: Georgia, serif; max-width: 900px; margin: 2em auto;
+         padding: 0 1.5em; color: #222; line-height: 1.5; }
+  h1 { font-size: 1.5em; }
+  .proto { background: #fff3cd; border: 1px solid #cc9; padding: .5em 1em;
+           border-radius: 4px; font-size: .9em; }
+  .accent { color: #0b5cad; }
+  #state { background: #f6f8fa; border: 1px solid #ddd; border-radius: 4px;
+           padding: 1em; min-height: 8em; }
+  #state pre { margin: .3em 0; white-space: pre-wrap; }
+  #change { font-style: italic; color: #0b5cad; min-height: 1.5em; }
+  .row { margin: .8em 0; }
+  button { font-size: .95em; margin: .15em .3em .15em 0; padding: .35em .8em;
+           cursor: pointer; }
+  button:disabled { cursor: default; opacity: .45; }
+  .tabs button.active { background: #0b5cad; color: #fff; }
+  .scenario { border-top: 1px solid #ddd; margin-top: 1em; padding-top: .5em; }
+  .stepbtn { border: 2px solid #0b5cad; }
+  .stepdone { border-color: #888; }
+  select { font-size: .95em; padding: .3em; }
+  code { background: #eef; padding: 0 .3em; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>PROTOTYPE: c-lox AST&rarr;C pass pipeline</h1>
+<div class="proto"><b>Throwaway demo.</b> Question: does the decomposition
+<code>check-core &rarr; resolve-scopes &rarr; lower-logical &rarr; emit-c</code>
+handle shadowing, short-circuit with side effects, assignment-as-expression,
+and illegal input — and yield C that preserves Lox semantics? Drive it:
+free-play below, or step through a guided scenario tab.</div>
+
+<h2>Free play</h2>
+<div class="row">
+  Sample:
+  <select id="sample"></select>
+  <button id="reset">Reset</button>
+</div>
+<div class="row" id="passbtns">
+  <button data-pass="check">1. check-core</button>
+  <button data-pass="resolve">2. resolve-scopes</button>
+  <button data-pass="lower">3. lower-logical</button>
+  <button data-pass="emit">4. emit-c</button>
+  <button data-pass="all">Run all</button>
+</div>
+
+<h2>Current IR</h2>
+<div id="change"></div>
+<div id="state"><pre id="ir">(pick a sample, then run a pass)</pre></div>
+
+<h2>Guided walkthroughs</h2>
+<div class="tabs row" id="tabs"></div>
+<div class="scenario">
+  <p id="scdesc"></p>
+  <div class="row" id="scsteps"></div>
+</div>
+
+<script>
+/* ================= PURE PASS MODULE (liftable) =================
+ * Tiny JSON AST mirroring parser.h variants (core subset + Call as the
+ * illegal-case probe). Values: {t:"num"},{t:"bool"},{t:"nil"},{t:"str"}.
+ * Every pass is pure: input tree in, new tree out, plus a change caption.
+ * Pass order is enforced by `needs` guards (check before resolve, ...).
+ */
+"use strict";
+
+function E(t, o) { o = o || {}; o.t = t; return o; }
+const num = (n, line) => E("Lit", {v: {t: "num", n}, line});
+const boolean = (b, line) => E("Lit", {v: {t: "bool", b}, line});
+const str = (s, line) => E("Lit", {v: {t: "str", s}, line});
+const vref = (name, line) => E("Var", {name, line});
+const assign = (name, val, line) => E("Assign", {name, val, line});
+const bin = (op, l, r, line) => E("Bin", {op, l, r, line});
+const una = (op, e, line) => E("Una", {op, e, line});
+const grp = e => E("Grp", {e});
+const log = (op, l, r, line) => E("Log", {op, l, r, line});
+const call = (callee, line) => E("Call", {callee, line}); // illegal in core
+const S = (t, o) => E(t, o); // statements share the envelope
+
+const ILLEGAL_EXPR = {Call: "function calls", Get: "properties",
+                      Set: "setters", Super: "super", This: "this"};
+const ILLEGAL_STMT = {Class: "classes", Function: "functions",
+                      Return: "return"};
+
+function check(stmts) {
+  const bad = [];
+  function ex(e) {
+    if (ILLEGAL_EXPR[e.t]) bad.push(`unsupported '${ILLEGAL_EXPR[e.t]}' at line ${e.line}`);
+    (e.l && ex(e.l), e.r && ex(e.r), e.e && ex(e.e));
+    if (e.val && e.val.t) ex(e.val);
+    if (e.callee) ex(e.callee);
+  }
+  function st(s) {
+    if (ILLEGAL_STMT[s.t]) bad.push(`unsupported '${ILLEGAL_STMT[s.t]}' at line ${s.line}`);
+    (s.stmts || []).forEach(st);
+    ["expr", "cond", "init", "val"].forEach(k => { if (s[k]) ex(s[k]); });
+    if (s.then) st(s.then);
+    if (s.else) st(s.else);
+    if (s.body) (Array.isArray(s.body) ? s.body.forEach(st) : st(s.body));
+  }
+  stmts.forEach(st);
+  if (bad.length) throw {pass: "check-core", errors: bad};
+  return {stmts: stmts.map(s => ({...s})), note: "all nodes are in L_core"};
+}
+
+/* resolve-scopes: rename every binding to _lox_<name>_<uid>.
+ * Initializers resolve in the ENCLOSING scope (can't see their own var),
+ * matching Lox semantics. Returns {stmts, note}. */
+function resolve(stmts) {
+  let uid = 0;
+  const changes = [];
+  function lookup(scopes, name, line) {
+    for (let i = scopes.length - 1; i >= 0; i--)
+      if (scopes[i].has(name)) return scopes[i].get(name);
+    throw {pass: "resolve-scopes", errors: [`undefined variable '${name}' at line ${line}`]};
+  }
+  function ex(e, scopes) {
+    switch (e.t) {
+      case "Var": return E("VarRef", {uid: lookup(scopes, e.name, e.line), orig: e.name, line: e.line});
+      case "Assign": return E("Assign", {uid: lookup(scopes, e.name, e.line), orig: e.name, val: ex(e.val, scopes), line: e.line});
+      case "Bin": return E("Bin", {...e, l: ex(e.l, scopes), r: ex(e.r, scopes)});
+      case "Una": return E("Una", {...e, e: ex(e.e, scopes)});
+      case "Grp": return E("Grp", {e: ex(e.e, scopes)});
+      case "Log": return E("Log", {...e, l: ex(e.l, scopes), r: ex(e.r, scopes)});
+      case "Lit": return e;
+    }
+    throw {pass: "resolve-scopes", errors: [`unexpected node '${e.t}' (run check-core first?)`]};
+  }
+  function block(list, scopes) {
+    const inner = new Map();
+    scopes.push(inner);
+    const out = list.map(s => st(s, scopes));
+    scopes.pop();
+    return out;
+  }
+  function st(s, scopes) {
+    switch (s.t) {
+      case "VarDecl": {
+        const init = s.init ? ex(s.init, scopes) : null; // enclosing scope!
+        uid++;
+        scopes[scopes.length - 1].set(s.name, uid);
+        changes.push(`${s.name}→_lox_${s.name}_${uid}`);
+        return S("VarDecl", {name: s.name, uid, init, line: s.line});
+      }
+      case "Print": return S("Print", {expr: ex(s.expr, scopes), line: s.line});
+      case "ExprStmt": return S("ExprStmt", {expr: ex(s.expr, scopes), line: s.line});
+      case "Block": return S("Block", {stmts: block(s.stmts, scopes), line: s.line});
+      case "If": return S("If", {cond: ex(s.cond, scopes), then: block([s.then], scopes)[0], else: s.else ? block([s.else], scopes)[0] : null, line: s.line});
+      case "While": return S("While", {cond: ex(s.cond, scopes), body: block([s.body], scopes)[0], line: s.line});
+    }
+    throw {pass: "resolve-scopes", errors: [`unexpected stmt '${s.t}'`]};
+  }
+  const out = block(stmts, []);
+  return {stmts: out, note: changes.length ? "renamed " + changes.join(", ") : "no bindings"};
+}
+
+/* lower-logical: eliminate Log via temp + If. `and`: t=l; if(!falsey(t)) t=r.
+ * `or`: t=l; if(falsey(t)) t=r. Expression lowering returns [preStmts, expr];
+ * RHS pre-statements land INSIDE the branch so laziness is preserved. */
+function lower(stmts) {
+  let n = 0, count = 0;
+  function ex(e) {
+    if (e.t === "Log") {
+      n++; count++;
+      const t = "$t" + n, line = e.line;
+      const [preL, l] = ex(e.l);
+      const [preR, r] = ex(e.r);
+      const tref = () => E("VarRef", {uid: 0, tmpname: t, line});
+      // Emitter wraps cond as `if (!is_falsey(cond))`, so: `and` enters iff t
+      // is truthy (bare t); `or` enters iff t is falsey (i.e. cond = !t).
+      const test = e.op === "and"
+        ? tref()
+        : E("Una", {op: "!", e: tref(), line});
+      const thenBlk = S("Block", {stmts: [...preR,
+        S("ExprStmt", {expr: E("Assign", {uid: 0, tmpname: t, val: r, line}), line})], line});
+      const seq = [...preL,
+        S("VarDecl", {name: t, uid: 0, tmp: true, init: l, line}),
+        S("If", {cond: test, then: thenBlk, else: null, line})];
+      return [seq, tref()];
+    }
+    if (e.t === "Bin") { const [p1, l] = ex(e.l); const [p2, r] = ex(e.r); return [[...p1, ...p2], E("Bin", {...e, l, r})]; }
+    if (e.t === "Una") { const [p, x] = ex(e.e); return [p, E("Una", {...e, e: x})]; }
+    if (e.t === "Grp") { const [p, x] = ex(e.e); return [p, E("Grp", {e: x})]; }
+    if (e.t === "Assign") { const [p, x] = ex(e.val); return [p, E("Assign", {...e, val: x})]; }
+    return [[], e];
+  }
+  function lw(s) { // statement -> statement list (pre-sequence spliced inline)
+    if (s.t === "Print") { const [p, x] = ex(s.expr); return [...p, S("Print", {expr: x, line: s.line})]; }
+    if (s.t === "ExprStmt") { const [p, x] = ex(s.expr); return [...p, S("ExprStmt", {expr: x, line: s.line})]; }
+    if (s.t === "VarDecl") {
+      if (!s.init) return [s];
+      const [p, x] = ex(s.init);
+      return [...p, S("VarDecl", {...s, init: x})];
+    }
+    if (s.t === "Block") return [S("Block", {stmts: s.stmts.flatMap(ss => lw(ss)), line: s.line})];
+    if (s.t === "If") {
+      const [p, c] = ex(s.cond);
+      const node = S("If", {cond: c,
+        then: S("Block", {stmts: lw(s.then), line: s.line}),
+        else: s.else ? S("Block", {stmts: lw(s.else), line: s.line}) : null, line: s.line});
+      return [...p, node];
+    }
+    if (s.t === "While") {
+      const [p, c] = ex(s.cond);
+      const node = S("While", {cond: c,
+        body: S("Block", {stmts: lw(s.body), line: s.line}), line: s.line});
+      return [...p, node];
+    }
+    return [s];
+  }
+  const out = stmts.flatMap(s => lw(s));
+  return {stmts: out, note: count ? `lowered ${count} logical operator(s) via temp+if` : "no logical operators"};
+}
+
+/* emit-c: L_flat -> C text. Shapes proven by the /tmp/opencode/cspike spike. */
+function emitC(stmts) {
+  const L = [];
+  // Phase 1: number tmp vars in order of appearance.
+  const tmpIds = {};
+  let tc = 0;
+  (function number(list) {
+    list.forEach(s => {
+      if (s.t === "VarDecl" && s.tmp && !(s.name in tmpIds)) tmpIds[s.name] = ++tc;
+      if (s.t === "Block") number(s.stmts);
+      if (s.t === "If") { number([s.then]); if (s.else) number([s.else]); }
+      if (s.t === "While") number([s.body]);
+    });
+  })(stmts);
+  const cname = id => id.tmpname ? `_lox_t${tmpIds[id.tmpname]}`
+    : `_lox_${id.orig || id.name}_${id.uid}`;
+  const cdec = s => s.tmp ? `_lox_t${tmpIds[s.name]}` : `_lox_${s.name}_${s.uid}`;
+  function val(v) {
+    if (v.t === "num") return `NUMBER_VAL(${v.n})`;
+    if (v.t === "bool") return `BOOL_VAL(${v.b ? "true" : "false"})`;
+    if (v.t === "nil") return "NIL_VAL";
+    return `lox_string(${JSON.stringify(v.s)}, ${v.s.length})`;
+  }
+  const OP = {"+": "lox_add", "-": "lox_sub", "*": "lox_mul", "/": "lox_div",
+              "==": "lox_equal", ">": "lox_greater", "<": "lox_less"};
+  function ex(e) {
+    switch (e.t) {
+      case "Lit": return val(e.v);
+      case "VarRef": return cname(e);
+      case "Assign": return `(${cname(e)} = ${ex(e.val)})`;
+      case "Bin":
+        if (e.op === "!=") return `lox_not(lox_equal(${ex(e.l)}, ${ex(e.r)}))`;
+        if (e.op === ">=") return `lox_not(lox_less(${ex(e.l)}, ${ex(e.r)}, ${e.line}))`;
+        if (e.op === "<=") return `lox_not(lox_greater(${ex(e.l)}, ${ex(e.r)}, ${e.line}))`;
+        return `${OP[e.op]}(${ex(e.l)}, ${ex(e.r)}, ${e.line})`;
+      case "Una":
+        return e.op === "!" ? `lox_not(${ex(e.e)})` : `lox_negate(${ex(e.e)}, ${e.line})`;
+      case "Grp": return `(${ex(e.e)})`;
+    }
+    throw {pass: "emit-c", errors: [`unlowered node '${e.t}'`]};
+  }
+  function st(s, ind) {
+    const p = "  ".repeat(ind);
+    switch (s.t) {
+      case "Print": return `${p}lox_print(${ex(s.expr)});  // line ${s.line}`;
+      case "ExprStmt": return `${p}${ex(s.expr)};  // line ${s.line}`;
+      case "VarDecl":
+        return `${p}Value ${cdec(s)} = ${s.init ? ex(s.init) : "NIL_VAL"};  // line ${s.line}`;
+      case "Block": return `${p}{\n${s.stmts.map(x => st(x, ind + 1)).join("\n")}\n${p}}`;
+      case "If": {
+        let r = `${p}if (!lox_is_falsey(${ex(s.cond)})) ${st(s.then, ind).trimStart()}`;
+        if (s.else) r += ` else ${st(s.else, ind).trimStart()}`;
+        return r;
+      }
+      case "While": return `${p}while (!lox_is_falsey(${ex(s.cond)})) ${st(s.body, ind).trimStart()}`;
+    }
+    throw {pass: "emit-c", errors: [`unlowered stmt '${s.t}'`]};
+  }
+  L.push('#include "loxrt.h"', "", "int main(void) {", "  lox_init();");
+  L.push(stmts.map(s => st(s, 1)).join("\n"));
+  L.push("  lox_free();", "  return 0;", "}");
+  return {text: L.join("\n"), note: "emitted C (shapes proven by spike)"};
+}
+
+/* ================= SAMPLES (pre-parsed ASTs) ================= */
+const SAMPLES = {
+  happy: {name: "happy: print + var", src: 'print 1 + 2 * 3;\nvar a = 4;\nprint a;',
+    stmts: [
+      S("Print", {expr: bin("+", num(1, 1), bin("*", num(2, 1), num(3, 1), 1), 1), line: 1}),
+      S("VarDecl", {name: "a", init: num(4, 2), line: 2}),
+      S("Print", {expr: vref("a", 3), line: 3})]},
+  shadow: {name: "edge: shadowing", src: 'var a = 1;\n{ var a = 2; print a; }\nprint a;',
+    stmts: [
+      S("VarDecl", {name: "a", init: num(1, 1), line: 1}),
+      S("Block", {stmts: [
+        S("VarDecl", {name: "a", init: num(2, 2), line: 2}),
+        S("Print", {expr: vref("a", 2), line: 2})], line: 2}),
+      S("Print", {expr: vref("a", 3), line: 3})]},
+  shortcircuit: {name: "edge: short-circuit + effects", src: 'var x = 0;\nprint false and (x = 1);\nprint x;',
+    stmts: [
+      S("VarDecl", {name: "x", init: num(0, 1), line: 1}),
+      S("Print", {expr: log("and", boolean(false, 2), grp(assign("x", num(1, 2), 2)), 2), line: 2}),
+      S("Print", {expr: vref("x", 3), line: 3})]},
+  assign: {name: "edge: assignment-as-expression", src: 'var y = 0;\nprint y = 1 + 2;',
+    stmts: [
+      S("VarDecl", {name: "y", init: num(0, 1), line: 1}),
+      S("Print", {expr: assign("y", bin("+", num(1, 2), num(2, 2), 2), 2), line: 2})]},
+  illegal: {name: "illegal: closure must be rejected", src: 'fun f() {}\nf();',
+    stmts: [
+      S("Function", {name: "f", line: 1}),
+      S("ExprStmt", {expr: call(vref("f", 2), 2), line: 2})]},
+};
+
+/* ================= PAGE SHELL (throwaway) ================= */
+const ORDER = ["check", "resolve", "lower", "emit"];
+let cur = null; // {key, src, stages:{}, done:Set, failed}
+const $ = id => document.getElementById(id);
+
+function render() {
+  if (!cur) return;
+  const last = ORDER.filter(p => cur.done.has(p)).pop();
+  $("ir").textContent = last === "emit" ? cur.stages.emit
+    : last ? JSON.stringify(cur.stages[last], null, 1)
+    : "// source:\n// " + cur.src.split("\n").join("\n// ");
+  document.querySelectorAll("#passbtns button").forEach(b => {
+    const p = b.dataset.pass;
+    if (p === "all") return;
+    const idx = ORDER.indexOf(p);
+    const prevOk = idx === 0 || cur.done.has(ORDER[idx - 1]);
+    b.disabled = !prevOk || cur.done.has(p) || !!cur.failed;
+  });
+}
+
+function runPass(p) {
+  if (!cur || cur.failed || cur.done.has(p)) return;
+  try {
+    if (p === "check") { const r = check(cur.stmts); cur.stages.check = r.stmts; cur.note = r.note; }
+    if (p === "resolve") { const r = resolve(cur.stages.check); cur.stages.resolve = r.stmts; cur.note = r.note; }
+    if (p === "lower") { const r = lower(cur.stages.resolve); cur.stages.lower = r.stmts; cur.note = r.note; }
+    if (p === "emit") { const r = emitC(cur.stages.lower); cur.stages.emit = r.text; cur.note = r.note; }
+    cur.done.add(p);
+    $("change").textContent = p + ": " + cur.note;
+  } catch (err) {
+    cur.failed = err;
+    $("change").textContent = `REJECTED by ${err.pass}: ${err.errors.join("; ")}`;
+  }
+  render();
+}
+
+function select(key) {
+  cur = {key, src: SAMPLES[key].src,
+         stmts: JSON.parse(JSON.stringify(SAMPLES[key].stmts)),
+         stages: {}, done: new Set(), failed: null};
+  $("change").textContent = "";
+  render();
+}
+
+// free-play wiring
+Object.keys(SAMPLES).forEach(k => {
+  const o = document.createElement("option"); o.value = k;
+  o.textContent = SAMPLES[k].name; $("sample").appendChild(o);
+});
+$("sample").onchange = e => select(e.target.value);
+$("reset").onclick = () => select($("sample").value);
+document.querySelectorAll("#passbtns button").forEach(b => {
+  b.onclick = () => {
+    if (b.dataset.pass === "all") ORDER.forEach(runPass); else runPass(b.dataset.pass);
+  };
+});
+
+// guided tabs
+const SCEN = [
+  {key: "happy", tab: "Happy path", desc: "Arithmetic, a variable, two prints. Watch each pass change almost nothing until emit-c turns it into C.", steps: ["check", "resolve", "lower", "emit"]},
+  {key: "shadow", tab: "Shadowing", desc: "Same name bound twice in nested blocks. Watch resolve-scopes split them into distinct uids — the case that breaks naive C emission.", steps: ["check", "resolve", "emit"]},
+  {key: "shortcircuit", tab: "Short-circuit", desc: "false and (x = 1): the RHS must NEVER run. Watch lower-logical introduce the temp+if that preserves laziness.", steps: ["check", "resolve", "lower", "emit"]},
+  {key: "assign", tab: "Assign-as-expr", desc: "print y = 1 + 2: assignment yields a value. Watch it survive all passes into a C assignment-expression.", steps: ["check", "resolve", "lower", "emit"]},
+  {key: "illegal", tab: "Illegal input", desc: "A function definition and call. check-core must reject it with a line number before any later pass runs.", steps: ["check"]},
+];
+let stepIdx = 0, activeSc = 0;
+function showSc(i) {
+  activeSc = i; stepIdx = 0;
+  select(SCEN[i].key);
+  $("scdesc").textContent = SCEN[i].desc;
+  document.querySelectorAll("#tabs button").forEach((b, j) => b.classList.toggle("active", j === i));
+  drawSteps();
+}
+function drawSteps() {
+  const box = $("scsteps"); box.innerHTML = "";
+  SCEN[activeSc].steps.forEach((p, j) => {
+    const b = document.createElement("button");
+    b.textContent = `${j + 1}. ${p}`;
+    b.className = "stepbtn" + (j < stepIdx ? " stepdone" : "");
+    b.disabled = j !== stepIdx;
+    b.onclick = () => { runPass(p); stepIdx++; drawSteps(); };
+    box.appendChild(b);
+  });
+}
+SCEN.forEach((s, i) => {
+  const b = document.createElement("button");
+  b.textContent = s.tab; b.onclick = () => showSc(i);
+  $("tabs").appendChild(b);
+});
+select("happy"); showSc(0);
+</script>
+</body>
+</html>

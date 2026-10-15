@@ -2,8 +2,9 @@
 #define clox_parser_h
 
 #include <datatype99.h>
-#include <list.h>
 #include <stdbool.h>
+
+#include <arena.h>
 
 #include "scanner.h"
 #include "value.h"
@@ -15,50 +16,39 @@ typedef struct {
   bool panicMode;
 } Parser;
 
-void parse(const char* source);
-
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
 
-typedef struct {
-  Expr* expr;
-  struct list_head list;
-} Expr_list;
-
-typedef struct {
-  Stmt* stmt;
-  struct list_head list;
-} Stmt_list;
-
-typedef struct {
-  Token token;
-  struct list_head list;
-} Token_list;
+typedef Slice(Expr*) ExprList;
+typedef Slice(Stmt*) StmtList;
+typedef Slice(Token) TokenList;
 
 #ifndef _CLANGD
 // clang-format off
+// Complete Lox grammar, appendix-i:
+// https://github.com/munificent/craftinginterpreters/blob/master/book/appendix-i.md
 datatype(Expr,
   (Literal, Value),
-  (Variable, Token),
-  (Call, Expr*, Token, Expr_list),
-  (This, Token),
-  (Super, Token, Token),
-  (Get, Expr*, Token),
-  (Set, Expr*, Token, Expr*),
-  (Grouping, Expr*),
   (Assign, Token, Expr*),
-  (Unary, Token, Expr*),
   (Binary, Expr*, Token, Expr*),
-  (Logical, Expr*, Token, Expr*)
+  (Call, Expr*, Token, ExprList),
+  (Get, Expr*, Token),
+  (Grouping, Expr*),
+  (Logical, Expr*, Token, Expr*),
+  (Set, Expr*, Token, Expr*),
+  (Super, Token, Token),
+  (This, Token),
+  (Unary, Token, Expr*),
+  (Variable, Token)
 );
 
 datatype(Stmt,
-  (Block, Stmt_list),
-  (Class, Token, ExprVariable, Stmt_list),
+  (Block, StmtList),
+  (Class, Token, Expr*, StmtList),
   (Expression, Expr*),
+  (Function, Token, TokenList, StmtList),
+  (If, Expr*, Stmt*, Stmt*),
   (Print, Expr*),
-  (Function, Token, Token_list, Stmt_list),
-  (If, Stmt*, Stmt*),
   (Return, Token, Expr*),
   (Var, Token, Expr*),
   (While, Expr*, Stmt*)
@@ -66,5 +56,24 @@ datatype(Stmt,
 // clang-format on
 
 #endif  // _CLANGD
+
+typedef struct {
+  StmtList statements;
+  bool hadError;
+} ParseResult;
+
+// Parse a full program (declaration* EOF) into arena-allocated AST.
+// Arena must outlive the returned AST. String literal Values reference
+// VM-heap ObjStrings (see copyString), not the arena.
+ParseResult parseProgram(Arena* arena, const char* source);
+
+// Debug helper: parse + pretty-print a program. Manages its own arena.
+void parse(const char* source);
+
+#ifndef _CLANGD
+void printExpr(Expr* expr);
+void printStmt(Stmt* stmt);
+void printProgram(StmtList statements);
+#endif
 
 #endif  // clox_parser_h

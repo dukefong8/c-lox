@@ -1,13 +1,25 @@
 #include "parser.h"
 
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <arena.h>
+
 #include "common.h"
 #include "debug.h"
+#include "object.h"
 #include "scanner.h"
 
 static Parser parser;
+
+// Bump-allocated AST storage. Set for the duration of parseProgram().
+static Arena* ast_arena = NULL;
+
+// ParseError unwinding: one jmp_buf per active declaration() frame.
+#define MAX_DECL_DEPTH 64
+static jmp_buf decl_jmp_stack[MAX_DECL_DEPTH];
+static int decl_jmp_depth = 0;
 
 static void errorAt(Token* token, const char* message) {
   if (parser.panicMode) return;
@@ -26,31 +38,47 @@ static void errorAt(Token* token, const char* message) {
   breakpoint();
 }
 
-static void error(const char* message) {
-  errorAt(&parser.previous, message);
+static void error(Token token, const char* message) {
+  errorAt(&token, message);
 }
 
 static void errorAtCurrent(const char* message) {
   errorAt(&parser.current, message);
 }
 
-static Token peek() {
+// Report + unwind to the innermost declaration(). For fatal syntax errors.
+static void throwAt(Token token, const char* message) {
+  errorAt(&token, message);
+  if (decl_jmp_depth > 0) {
+    longjmp(decl_jmp_stack[decl_jmp_depth - 1], 1);
+  }
+}
+
+static void throwAtCurrent(const char* message) {
+  throwAt(parser.current, message);
+}
+
+static Token peek(void) {
   return parser.current;
 }
 
-static Token previous() {
+static Token previous(void) {
   return parser.previous;
 }
 
+static bool isAtEnd(void) {
+  return parser.current.type == TOKEN_EOF;
+}
+
 static bool check(TokenType type) {
+  if (isAtEnd()) return false;
   return peek().type == type;
 }
 
-static void advance() {
+static void advance(void) {
   parser.previous = parser.current;
 
   for (;;) {
-    asm("a1:");
     parser.current = scanToken();
     if (!check(TOKEN_ERROR)) break;
 
@@ -78,94 +106,416 @@ static bool matchany(const TokenType* types) {
   return false;
 }
 
-static void consume(TokenType type, const char* message) {
+// Fatal: throws to declaration() on failure.
+static Token consume(TokenType type, const char* message) {
   if (check(type)) {
     advance();
-    return;
+    return previous();
   }
 
-  errorAtCurrent(message);
+  throwAtCurrent(message);
+  // Unreachable, but appease compilers when longjmp is disabled.
+  Token dummy = {0};
+  return dummy;
 }
 
-#define New(Type, Value)                        \
-  ({                                            \
-    Type* value_ = (Type*)malloc(sizeof(Type)); \
-    *value_ = (Value);                          \
-    value_;                                     \
-  })
+static void synchronize(void) {
+  advance();
+
+  while (!isAtEnd()) {
+    if (previous().type == TOKEN_SEMICOLON) break;
+
+    switch (peek().type) {
+      case TOKEN_CLASS:
+      case TOKEN_FUN:
+      case TOKEN_VAR:
+      case TOKEN_FOR:
+      case TOKEN_IF:
+      case TOKEN_WHILE:
+      case TOKEN_PRINT:
+      case TOKEN_RETURN:
+        parser.panicMode = false;
+        return;
+      default:
+        break;
+    }
+
+    advance();
+  }
+
+  parser.panicMode = false;
+}
 
 #ifndef _CLANGD
 
-static void printExpr(Expr* expr) {
+static Expr* newExpr(Expr value) {
+  return New(ast_arena, Expr, 1, &value);
+}
+
+static Stmt* newStmt(Stmt value) {
+  return New(ast_arena, Stmt, 1, &value);
+}
+
+void printExpr(Expr* expr) {
+  if (expr == NULL) {
+    printf("<error>");
+    return;
+  }
   match(*expr) {
     of(Literal, value) printValue(*value);
-    of(Variable, token) printf("%.*s", token->length, token->start);
-    of(Grouping, expr) printExpr(*expr);
-    of(Assign, var, expr) {
-      printf("%.*s = ", var->length, var->start);
-      printExpr(*expr);
-    }
-    of(Unary, op, expr) {
-      printf("%.*s", op->length, op->start);
-      printExpr(*expr);
+    of(Assign, name, value) {
+      printf("(assign %.*s ", name->length, name->start);
+      printExpr(*value);
+      printf(")");
     }
     of(Binary, left, op, right) {
-      printf("(");
-      printf("%.*s ", op->length, op->start);
+      printf("(%.*s ", op->length, op->start);
       printExpr(*left);
       printf(" ");
       printExpr(*right);
       printf(")");
     }
+    of(Call, callee, paren, args) {
+      (void)paren;
+      printf("(call ");
+      printExpr(*callee);
+      for (isize i = 0; i < args->len; i++) {
+        printf(" ");
+        printExpr(args->data[i]);
+      }
+      printf(")");
+    }
+    of(Get, object, name) {
+      printf("(get ");
+      printExpr(*object);
+      printf(" %.*s)", name->length, name->start);
+    }
+    of(Grouping, inner) {
+      printf("(group ");
+      printExpr(*inner);
+      printf(")");
+    }
     of(Logical, left, op, right) {
-      printf("(");
-      printf(" %.*s ", op->length, op->start);
+      printf("(%.*s ", op->length, op->start);
       printExpr(*left);
       printf(" ");
       printExpr(*right);
+      printf(")");
+    }
+    of(Set, object, name, value) {
+      printf("(set ");
+      printExpr(*object);
+      printf(" %.*s ", name->length, name->start);
+      printExpr(*value);
+      printf(")");
+    }
+    of(Super, keyword, method) {
+      (void)keyword;
+      printf("(super %.*s)", method->length, method->start);
+    }
+    of(This, keyword) {
+      (void)keyword;
+      printf("this");
+    }
+    of(Unary, op, right) {
+      printf("(%.*s ", op->length, op->start);
+      printExpr(*right);
+      printf(")");
+    }
+    of(Variable, name) printf("%.*s", name->length, name->start);
+  }
+}
+
+void printStmt(Stmt* stmt) {
+  if (stmt == NULL) {
+    printf("<error stmt>\n");
+    return;
+  }
+  match(*stmt) {
+    of(Block, statements) {
+      printf("(block");
+      for (isize i = 0; i < statements->len; i++) {
+        printf(" ");
+        printStmt(statements->data[i]);
+      }
+      printf(")");
+    }
+    of(Class, name, superclass, methods) {
+      printf("(class %.*s", name->length, name->start);
+      if (*superclass != NULL) {
+        printf(" < ");
+        printExpr(*superclass);
+      }
+      for (isize i = 0; i < methods->len; i++) {
+        printf(" ");
+        printStmt(methods->data[i]);
+      }
+      printf(")");
+    }
+    of(Expression, expression) {
+      printf("(expr ");
+      printExpr(*expression);
+      printf(")");
+    }
+    of(Function, name, params, body) {
+      printf("(fun %.*s(", name->length, name->start);
+      for (isize i = 0; i < params->len; i++) {
+        if (i > 0) printf(" ");
+        printf("%.*s", params->data[i].length, params->data[i].start);
+      }
+      printf(")");
+      for (isize i = 0; i < body->len; i++) {
+        printf(" ");
+        printStmt(body->data[i]);
+      }
+      printf(")");
+    }
+    of(If, condition, thenBranch, elseBranch) {
+      printf("(if ");
+      printExpr(*condition);
+      printf(" ");
+      printStmt(*thenBranch);
+      if (*elseBranch != NULL) {
+        printf(" ");
+        printStmt(*elseBranch);
+      }
+      printf(")");
+    }
+    of(Print, expression) {
+      printf("(print ");
+      printExpr(*expression);
+      printf(")");
+    }
+    of(Return, keyword, value) {
+      (void)keyword;
+      printf("(return");
+      if (*value != NULL) {
+        printf(" ");
+        printExpr(*value);
+      }
+      printf(")");
+    }
+    of(Var, name, initializer) {
+      printf("(var %.*s", name->length, name->start);
+      if (*initializer != NULL) {
+        printf(" ");
+        printExpr(*initializer);
+      }
+      printf(")");
+    }
+    of(While, condition, body) {
+      printf("(while ");
+      printExpr(*condition);
+      printf(" ");
+      printStmt(*body);
       printf(")");
     }
   }
 }
 
-static Stmt* statement();
-static Expr* expression();
-static Expr* assignment();
-static Expr* logic_or();
-static Expr* logic_and();
-static Expr* equality();
-static Expr* comparision();
-static Expr* term();
-static Expr* factor();
-static Expr* unary();
-static Expr* call();
-static Expr* primary();
+void printProgram(StmtList statements) {
+  for (isize i = 0; i < statements.len; i++) {
+    printStmt(statements.data[i]);
+    printf("\n");
+  }
+}
 
-void parse(const char* source) {
-  initScanner(source);
+// Forward declarations (appendix-i order).
+static Stmt* declaration(void);
+static Stmt* classDeclaration(void);
+static Stmt* function(const char* kind);
+static Stmt* varDeclaration(void);
+static Stmt* statement(void);
+static Stmt* expressionStatement(void);
+static Stmt* printStatement(void);
+static Stmt* returnStatement(void);
+static Stmt* ifStatement(void);
+static Stmt* whileStatement(void);
+static Stmt* forStatement(void);
+static StmtList block(void);
+static Expr* expression(void);
+static Expr* assignment(void);
+static Expr* logic_or(void);
+static Expr* logic_and(void);
+static Expr* equality(void);
+static Expr* comparison(void);
+static Expr* term(void);
+static Expr* factor(void);
+static Expr* unary(void);
+static Expr* finishCall(Expr* callee);
+static Expr* call(void);
+static Expr* primary(void);
+
+ParseResult parseProgram(Arena* arena, const char* source) {
+  ast_arena = arena;
   parser.hadError = false;
   parser.panicMode = false;
+  decl_jmp_depth = 0;
 
+  initScanner(source);
   advance();
-  Expr* expr = expression();
-  consume(TOKEN_EOF, "Expect end of expression.");
-  printExpr(expr);
+
+  StmtList statements = {0};
+  while (!isAtEnd()) {
+    Stmt* decl = declaration();
+    if (decl != NULL) {
+      Push(arena, &statements, decl);
+    }
+  }
+
+  ast_arena = NULL;
+  return (ParseResult){statements, parser.hadError};
 }
 
-//  expression   → assignment ;
-static Expr* expression() {
-  return assignment();
+void parse(const char* source) {
+  byte* buf = malloc(MB(8));
+  if (buf == NULL) {
+    fprintf(stderr, "Out of memory in parser.\n");
+    return;
+  }
+  Arena arena = arena_init(buf, MB(8));
+
+  jmp_buf oom;
+  if (ArenaOOM(&arena, oom)) {
+    fprintf(stderr, "Out of memory in parser arena.\n");
+    free(buf);
+    ast_arena = NULL;
+    return;
+  }
+
+  ParseResult result = parseProgram(&arena, source);
+  if (!result.hadError) {
+    printProgram(result.statements);
+  }
+
+  free(buf);
 }
 
-// printStmt      → "print" expression ";" ;
-static Stmt* printStatement() {
+// declaration → classDecl | funDecl | varDecl | statement ;
+static Stmt* declaration(void) {
+  if (decl_jmp_depth >= MAX_DECL_DEPTH) {
+    errorAtCurrent("Declaration nesting too deep.");
+    synchronize();
+    return NULL;
+  }
+  jmp_buf* slot = &decl_jmp_stack[decl_jmp_depth++];
+  Stmt* result = NULL;
+  if (setjmp(*slot) == 0) {
+    if (match1(TOKEN_CLASS)) {
+      result = classDeclaration();
+    } else if (match1(TOKEN_FUN)) {
+      result = function("function");
+    } else if (match1(TOKEN_VAR)) {
+      result = varDeclaration();
+    } else {
+      result = statement();
+    }
+  } else {
+    // ParseError: unwind from a nested consume()/primary().
+    synchronize();
+    result = NULL;
+  }
+  decl_jmp_depth--;
+  return result;
+}
+
+// classDecl → "class" IDENTIFIER ( "<" IDENTIFIER )? "{" function* "}" ;
+static Stmt* classDeclaration(void) {
+  Token name = consume(TOKEN_IDENTIFIER, "Expect class name.");
+
+  Expr* superclass = NULL;
+  if (match1(TOKEN_LESS)) {
+    Token superName = consume(TOKEN_IDENTIFIER, "Expect superclass name.");
+    superclass = newExpr(Variable(superName));
+  }
+
+  consume(TOKEN_LEFT_BRACE, "Expect '{' before class body.");
+
+  StmtList methods = {0};
+  while (!check(TOKEN_RIGHT_BRACE) && !isAtEnd()) {
+    Push(ast_arena, &methods, function("method"));
+  }
+
+  consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
+
+  return newStmt(Class(name, superclass, methods));
+}
+
+// function → IDENTIFIER "(" parameters? ")" block ;
+// parameters → IDENTIFIER ( "," IDENTIFIER )* ;
+static Stmt* function(const char* kind) {
+  char msg[64];
+
+  snprintf(msg, sizeof(msg), "Expect %s name.", kind);
+  Token name = consume(TOKEN_IDENTIFIER, msg);
+
+  snprintf(msg, sizeof(msg), "Expect '(' after %s name.", kind);
+  consume(TOKEN_LEFT_PAREN, msg);
+
+  TokenList params = {0};
+  if (!check(TOKEN_RIGHT_PAREN)) {
+    do {
+      if (params.len >= 255) {
+        // Non-fatal like jlox: report, keep parsing.
+        error(peek(), "Can't have more than 255 parameters.");
+      }
+      Push(ast_arena, &params, consume(TOKEN_IDENTIFIER, "Expect parameter name."));
+    } while (match1(TOKEN_COMMA));
+  }
+  consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+
+  snprintf(msg, sizeof(msg), "Expect '{' before %s body.", kind);
+  consume(TOKEN_LEFT_BRACE, msg);
+  StmtList body = block();
+
+  return newStmt(Function(name, params, body));
+}
+
+// varDecl → "var" IDENTIFIER ( "=" expression )? ";" ;
+static Stmt* varDeclaration(void) {
+  Token name = consume(TOKEN_IDENTIFIER, "Expect variable name.");
+
+  Expr* initializer = NULL;
+  if (match1(TOKEN_EQUAL)) {
+    initializer = expression();
+  }
+
+  consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+  return newStmt(Var(name, initializer));
+}
+
+// statement → exprStmt | forStmt | ifStmt | printStmt | returnStmt
+//           | whileStmt | block ;
+static Stmt* statement(void) {
+  if (match1(TOKEN_FOR)) return forStatement();
+  if (match1(TOKEN_IF)) return ifStatement();
+  if (match1(TOKEN_PRINT)) return printStatement();
+  if (match1(TOKEN_RETURN)) return returnStatement();
+  if (match1(TOKEN_WHILE)) return whileStatement();
+  if (match1(TOKEN_LEFT_BRACE)) {
+    StmtList stmts = block();
+    return newStmt(Block(stmts));
+  }
+
+  return expressionStatement();
+}
+
+// exprStmt → expression ";" ;
+static Stmt* expressionStatement(void) {
   Expr* expr = expression();
+  consume(TOKEN_SEMICOLON, "Expect ';' after expression.");
+  return newStmt(Expression(expr));
+}
+
+// printStmt → "print" expression ";" ;
+static Stmt* printStatement(void) {
+  Expr* value = expression();
   consume(TOKEN_SEMICOLON, "Expect ';' after value.");
-  return New(Stmt, Print(expr));
+  return newStmt(Print(value));
 }
 
-// returnStmt     → "return" expression? ";" ;
-static Stmt* returnStatement() {
+// returnStmt → "return" expression? ";" ;
+static Stmt* returnStatement(void) {
   Token keyword = previous();
   Expr* value = NULL;
   if (!check(TOKEN_SEMICOLON)) {
@@ -173,211 +523,297 @@ static Stmt* returnStatement() {
   }
 
   consume(TOKEN_SEMICOLON, "Expect ';' after return value.");
-  return New(Stmt, Return(keyword, value));
+  return newStmt(Return(keyword, value));
 }
 
-// whileStmt      → "while" "(" expression ")" statement ;
-static Stmt* whileStatement() {
-  consume(TOKEN_LEFT_PAREN, "Expect '(' after while.");
-  Expr* cond = expression();
-  consume(TOKEN_LEFT_PAREN, "Expect ')' after condition.");
+// ifStmt → "if" "(" expression ")" statement ( "else" statement )? ;
+static Stmt* ifStatement(void) {
+  consume(TOKEN_LEFT_PAREN, "Expect '(' after 'if'.");
+  Expr* condition = expression();
+  consume(TOKEN_RIGHT_PAREN, "Expect ')' after if condition.");
+
+  Stmt* thenBranch = statement();
+  Stmt* elseBranch = NULL;
+  if (match1(TOKEN_ELSE)) {
+    elseBranch = statement();
+  }
+
+  return newStmt(If(condition, thenBranch, elseBranch));
+}
+
+// whileStmt → "while" "(" expression ")" statement ;
+static Stmt* whileStatement(void) {
+  consume(TOKEN_LEFT_PAREN, "Expect '(' after 'while'.");
+  Expr* condition = expression();
+  consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
   Stmt* body = statement();
-  return New(Stmt, While(cond, body));
+
+  return newStmt(While(condition, body));
 }
 
-// exprStmt       → expression ";" ;
-static Stmt* expressionStatement() {
-  Expr* expr = expression();
-  consume(TOKEN_SEMICOLON, "Expect ';' after value.");
-  return New(Stmt, Expression(expr));
+// forStmt → "for" "(" ( varDecl | exprStmt | ";" )
+//                     expression? ";" expression? ")" statement ;
+// Desugared to Block/While like jlox.
+static Stmt* forStatement(void) {
+  consume(TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
+
+  Stmt* initializer = NULL;
+  if (match1(TOKEN_SEMICOLON)) {
+    initializer = NULL;
+  } else if (match1(TOKEN_VAR)) {
+    initializer = varDeclaration();
+  } else {
+    initializer = expressionStatement();
+  }
+
+  Expr* condition = NULL;
+  if (!check(TOKEN_SEMICOLON)) {
+    condition = expression();
+  }
+  consume(TOKEN_SEMICOLON, "Expect ';' after loop condition.");
+
+  Expr* increment = NULL;
+  if (!check(TOKEN_RIGHT_PAREN)) {
+    increment = expression();
+  }
+  consume(TOKEN_RIGHT_PAREN, "Expect ')' after for clauses.");
+
+  Stmt* body = statement();
+
+  if (increment != NULL) {
+    StmtList seq = {0};
+    Push(ast_arena, &seq, body);
+    Push(ast_arena, &seq, newStmt(Expression(increment)));
+    body = newStmt(Block(seq));
+  }
+
+  if (condition == NULL) {
+    condition = newExpr(Literal(BOOL_VAL(true)));
+  }
+  body = newStmt(While(condition, body));
+
+  if (initializer != NULL) {
+    StmtList seq = {0};
+    Push(ast_arena, &seq, initializer);
+    Push(ast_arena, &seq, body);
+    body = newStmt(Block(seq));
+  }
+
+  return body;
 }
 
-static Stmt* statement() {
-  if (match1(TOKEN_PRINT)) return printStatement();
-  if (match1(TOKEN_RETURN)) return returnStatement();
-  if (match1(TOKEN_WHILE)) return whileStatement();
+// block → "{" declaration* "}" ;
+static StmtList block(void) {
+  StmtList statements = {0};
 
-  return expressionStatement();
+  while (!check(TOKEN_RIGHT_BRACE) && !isAtEnd()) {
+    Stmt* decl = declaration();
+    if (decl != NULL) {
+      Push(ast_arena, &statements, decl);
+    }
+  }
+
+  consume(TOKEN_RIGHT_BRACE, "Expect '}' after block.");
+  return statements;
 }
 
-/*
-  assignment   → IDENTIFIER "=" assignment
-               | logic_or ;
- */
-static Expr* assignment() {
+// expression → assignment ;
+static Expr* expression(void) {
+  return assignment();
+}
+
+// assignment → ( call "." )? IDENTIFIER "=" assignment | logic_or ;
+static Expr* assignment(void) {
   Expr* expr = logic_or();
 
   if (match1(TOKEN_EQUAL)) {
-    match(*expr) {
-      of(Variable, name) {
-        Expr* value = assignment();
-        return New(Expr, Assign(*name, value));
+    Token equals = previous();
+    Expr* value = assignment();
+
+    if (expr != NULL) {
+      match(*expr) {
+        of(Variable, name) {
+          return newExpr(Assign(*name, value));
+        }
+        of(Get, object, name) {
+          return newExpr(Set(*object, *name, value));
+        }
+        otherwise {
+          // Non-fatal like jlox ([no-throw]).
+          error(equals, "Invalid assignment target.");
+        }
       }
-      otherwise error("Expect identifier");
     }
   }
 
   return expr;
 }
 
-/*
-  logic_or      → logic_and ( "or" logic_and )* ;
- */
-static Expr* logic_or() {
+// logic_or → logic_and ( "or" logic_and )* ;
+static Expr* logic_or(void) {
   Expr* expr = logic_and();
 
   while (match1(TOKEN_OR)) {
     Token op = previous();
     Expr* right = logic_and();
-    expr = New(Expr, Logical(expr, op, right));
+    expr = newExpr(Logical(expr, op, right));
   }
 
   return expr;
 }
 
-/*
-  logic_and      → equality ( "and" equality )* ;
- */
-static Expr* logic_and() {
+// logic_and → equality ( "and" equality )* ;
+static Expr* logic_and(void) {
   Expr* expr = equality();
 
   while (match1(TOKEN_AND)) {
     Token op = previous();
     Expr* right = equality();
-    expr = New(Expr, Logical(expr, op, right));
+    expr = newExpr(Logical(expr, op, right));
   }
 
   return expr;
 }
 
-/*
-  equality      → comparison ( ( "!=" | "==" ) comparison )* ;
- */
-static Expr* equality() {
-  Expr* expr = comparision();
+// equality → comparison ( ( "!=" | "==" ) comparison )* ;
+static Expr* equality(void) {
+  Expr* expr = comparison();
 
   while (matchany((TokenType[]){TOKEN_BANG_EQUAL, TOKEN_EQUAL_EQUAL, 0})) {
     Token op = previous();
-    Expr* right = comparision();
-    expr = New(Expr, Binary(expr, op, right));
+    Expr* right = comparison();
+    expr = newExpr(Binary(expr, op, right));
   }
 
   return expr;
 }
 
-/*
-  comparison     → term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
- */
-static Expr* comparision() {
+// comparison → term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
+static Expr* comparison(void) {
   Expr* expr = term();
 
   while (
     matchany((TokenType[]){TOKEN_GREATER, TOKEN_GREATER_EQUAL, TOKEN_LESS, TOKEN_LESS_EQUAL, 0})) {
     Token op = previous();
     Expr* right = term();
-    expr = New(Expr, Binary(expr, op, right));
+    expr = newExpr(Binary(expr, op, right));
   }
 
   return expr;
 }
 
-/*
-  term          → factor ( ( "-" | "+" ) factor )* ;
- */
-static Expr* term() {
+// term → factor ( ( "-" | "+" ) factor )* ;
+static Expr* term(void) {
   Expr* expr = factor();
 
   while (matchany((TokenType[]){TOKEN_MINUS, TOKEN_PLUS, 0})) {
     Token op = previous();
     Expr* right = factor();
-    expr = New(Expr, Binary(expr, op, right));
+    expr = newExpr(Binary(expr, op, right));
   }
 
   return expr;
 }
 
-/*
- factor         → unary ( ( "/" | "*" ) unary )* ;
- */
-static Expr* factor() {
+// factor → unary ( ( "/" | "*" ) unary )* ;
+static Expr* factor(void) {
   Expr* expr = unary();
 
   while (matchany((TokenType[]){TOKEN_SLASH, TOKEN_STAR, 0})) {
     Token op = previous();
     Expr* right = unary();
-    expr = New(Expr, Binary(expr, op, right));
+    expr = newExpr(Binary(expr, op, right));
   }
 
   return expr;
 }
 
-/*
-  unary        → ( "!" | "-" ) unary
-               | primary ;
- */
-static Expr* unary() {
+// unary → ( "!" | "-" ) unary | call ;
+static Expr* unary(void) {
   if (matchany((TokenType[]){TOKEN_BANG, TOKEN_MINUS, 0})) {
     Token op = previous();
     Expr* right = unary();
-    return New(Expr, Unary(op, right));
+    return newExpr(Unary(op, right));
   }
 
   return call();
 }
 
-// call       → primary ( "(" arguments? ")" | "." IDENTIFIER )* ;
-static Expr* call() {
+// arguments → expression ( "," expression )* ;
+static Expr* finishCall(Expr* callee) {
+  ExprList arguments = {0};
+  if (!check(TOKEN_RIGHT_PAREN)) {
+    do {
+      if (arguments.len >= 255) {
+        // Non-fatal like jlox: report, keep parsing.
+        error(peek(), "Can't have more than 255 arguments.");
+      }
+      Push(ast_arena, &arguments, expression());
+    } while (match1(TOKEN_COMMA));
+  }
+
+  Token paren = consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
+
+  return newExpr(Call(callee, paren, arguments));
+}
+
+// call → primary ( "(" arguments? ")" | "." IDENTIFIER )* ;
+static Expr* call(void) {
   Expr* expr = primary();
 
   for (;;) {
     if (match1(TOKEN_LEFT_PAREN)) {
-      // TODO: return callArguments(expr);
+      expr = finishCall(expr);
     } else if (match1(TOKEN_DOT)) {
-      consume(TOKEN_IDENTIFIER, "Expect field name after '.'.");
-      expr = New(Expr, Get(expr, previous()));
-    } else
+      Token name = consume(TOKEN_IDENTIFIER, "Expect property name after '.'.");
+      expr = newExpr(Get(expr, name));
+    } else {
       break;
+    }
   }
 
   return expr;
 }
 
-/*
-  primary      → NUMBER | STRING | IDENTIFIER | "true" | "false" | "nil"
-               | "(" expression ")" ;
- */
-static Expr* primary() {
-  if (match1(TOKEN_NIL)) return New(Expr, Literal(NIL_VAL));
-  if (match1(TOKEN_TRUE)) return New(Expr, Literal(BOOL_VAL(true)));
-  if (match1(TOKEN_FALSE)) return New(Expr, Literal(BOOL_VAL(false)));
+// primary → "true" | "false" | "nil" | "this" | NUMBER | STRING
+//         | IDENTIFIER | "(" expression ")"
+//         | "super" "." IDENTIFIER ;
+static Expr* primary(void) {
+  if (match1(TOKEN_FALSE)) return newExpr(Literal(BOOL_VAL(false)));
+  if (match1(TOKEN_TRUE)) return newExpr(Literal(BOOL_VAL(true)));
+  if (match1(TOKEN_NIL)) return newExpr(Literal(NIL_VAL));
 
   if (match1(TOKEN_NUMBER)) {
     double number = strtod(previous().start, NULL);
-    return New(Expr, Literal(NUMBER_VAL(number)));
+    return newExpr(Literal(NUMBER_VAL(number)));
   }
 
-  // TODO: STRING
-
-  if (match1(TOKEN_IDENTIFIER)) {
-    return New(Expr, Variable(previous()));
-  }
-
-  if (match1(TOKEN_LEFT_PAREN)) {
-    Expr* expr = expression();
-    consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
-    return New(Expr, Grouping(expr));
+  if (match1(TOKEN_STRING)) {
+    Token str = previous();
+    return newExpr(Literal(OBJ_VAL(copyString(str.start + 1, str.length - 2))));
   }
 
   if (match1(TOKEN_SUPER)) {
     Token keyword = previous();
-    consume(TOKEN_DOT, "Expect . after super");
-    consume(TOKEN_IDENTIFIER, "Expect identifier");
-    return New(Expr, Super(keyword, previous()));
+    consume(TOKEN_DOT, "Expect '.' after 'super'.");
+    Token method = consume(TOKEN_IDENTIFIER, "Expect superclass method name.");
+    return newExpr(Super(keyword, method));
   }
 
-  errorAtCurrent("Expect expression.");
-  return NULL;  // Unreachable;
+  if (match1(TOKEN_THIS)) return newExpr(This(previous()));
+
+  if (match1(TOKEN_IDENTIFIER)) {
+    return newExpr(Variable(previous()));
+  }
+
+  if (match1(TOKEN_LEFT_PAREN)) {
+    Expr* expr = expression();
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression.");
+    return newExpr(Grouping(expr));
+  }
+
+  throwAtCurrent("Expect expression.");
+  return NULL;  // Unreachable.
 }
 
-#undef New
 #endif
