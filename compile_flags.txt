@@ -1,4 +1,4 @@
 -I
 ./
 -I
-/home/duke/dev/ModernC/include
+../ModernC/include

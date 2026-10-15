@@ -1,8 +1,6 @@
 #include "cgen.h"
-
 #include <stdio.h>
 #include <string.h>
-
 #include "debug.h"
 #include "object.h"
 #include "value.h"
@@ -49,23 +47,26 @@ static int new_uid(CGen* g, int funcId, Token token, bool isGlobal) {
   int uid = ++g->uid;
   Push(g->arena, &g->uidFunc, funcId);
   Push(g->arena, &g->uidGlobal, isGlobal);
-  Push(g->arena, &g->uidCaptured, false);
+  Push(g->arena, &g->uidCaptured, (bool)false);
   Push(g->arena, &g->uidToken, token);
   return uid;
 }
 
 static int uid_func(CGen* g, int uid) {
-  if (uid <= 0 || uid > (int)g->uidFunc.len) return -1;
+  if (uid <= 0 || uid > (int)g->uidFunc.len)
+    return -1;
   return g->uidFunc.data[uid - 1];
 }
 
 static bool uid_is_global(CGen* g, int uid) {
-  if (uid <= 0 || uid > (int)g->uidGlobal.len) return false;
+  if (uid <= 0 || uid > (int)g->uidGlobal.len)
+    return false;
   return g->uidGlobal.data[uid - 1];
 }
 
 static bool uid_is_boxed(CGen* g, int uid) {
-  if (uid <= 0 || uid > (int)g->uidCaptured.len) return false;
+  if (uid <= 0 || uid > (int)g->uidCaptured.len)
+    return false;
   return g->uidCaptured.data[uid - 1];
 }
 
@@ -119,9 +120,12 @@ static RStmt* newRStmt(CGen* g, RStmt value) {
 // ---- Pass 1: check-core (L_src -> L_core or error) ----
 
 static void check_expr(CGen* g, Expr* e) {
-  if (g->hadError) return;
+  if (g->hadError)
+    return;
   match(*e) {
-    of(Literal, value) { (void)value; }
+    of(Literal, value) {
+      (void)value;
+    }
     of(Assign, name, val) {
       (void)name;
       check_expr(g, *val);
@@ -134,13 +138,16 @@ static void check_expr(CGen* g, Expr* e) {
     of(Call, callee, paren, args) {
       (void)paren;
       check_expr(g, *callee);
-      for (isize i = 0; i < args->len; i++) check_expr(g, args->data[i]);
+      for (isize i = 0; i < args->len; i++)
+        check_expr(g, args->data[i]);
     }
     of(Get, object, name) {
       (void)object;
       cgen_error(g, name->line, "unsupported 'properties'");
     }
-    of(Grouping, inner) { check_expr(g, *inner); }
+    of(Grouping, inner) {
+      check_expr(g, *inner);
+    }
     of(Logical, left, op, right) {
       (void)op;
       check_expr(g, *left);
@@ -155,48 +162,62 @@ static void check_expr(CGen* g, Expr* e) {
       (void)method;
       cgen_error(g, keyword->line, "unsupported 'super'");
     }
-    of(This, keyword) { cgen_error(g, keyword->line, "unsupported 'this'"); }
+    of(This, keyword) {
+      cgen_error(g, keyword->line, "unsupported 'this'");
+    }
     of(Unary, op, right) {
       (void)op;
       check_expr(g, *right);
     }
-    of(Variable, name) { (void)name; }
+    of(Variable, name) {
+      (void)name;
+    }
   }
 }
 
 static void check_stmt(CGen* g, Stmt* s, bool inFun) {
-  if (g->hadError) return;
+  if (g->hadError)
+    return;
   match(*s) {
     of(Block, statements) {
-      for (isize i = 0; i < statements->len; i++) check_stmt(g, statements->data[i], inFun);
+      for (isize i = 0; i < statements->len; i++)
+        check_stmt(g, statements->data[i], inFun);
     }
     of(Class, name, superclass, methods) {
       (void)superclass;
       (void)methods;
       cgen_error(g, name->line, "unsupported 'classes'");
     }
-    of(Expression, expression) { check_expr(g, *expression); }
+    of(Expression, expression) {
+      check_expr(g, *expression);
+    }
     of(Function, name, params, body) {
       (void)name;
       (void)params;
-      for (isize i = 0; i < body->len; i++) check_stmt(g, body->data[i], true);
+      for (isize i = 0; i < body->len; i++)
+        check_stmt(g, body->data[i], true);
     }
     of(If, condition, thenBranch, elseBranch) {
       check_expr(g, *condition);
       check_stmt(g, *thenBranch, inFun);
-      if (*elseBranch != NULL) check_stmt(g, *elseBranch, inFun);
+      if (*elseBranch != NULL)
+        check_stmt(g, *elseBranch, inFun);
     }
-    of(Print, expression) { check_expr(g, *expression); }
+    of(Print, expression) {
+      check_expr(g, *expression);
+    }
     of(Return, keyword, value) {
       if (!inFun) {
         cgen_error(g, keyword->line, "Can't return from top-level code.");
         return;
       }
-      if (*value != NULL) check_expr(g, *value);
+      if (*value != NULL)
+        check_expr(g, *value);
     }
     of(Var, name, initializer) {
       (void)name;
-      if (*initializer != NULL) check_expr(g, *initializer);
+      if (*initializer != NULL)
+        check_expr(g, *initializer);
     }
     of(While, condition, body) {
       check_expr(g, *condition);
@@ -254,13 +275,13 @@ static int scope_bind(CGen* g, CgenScope* scope, Token name) {
 static int scope_reuse_or_bind(CGen* g, CgenScope* scope, Token name) {
   for (isize i = 0; i < scope->bindings.len; i++) {
     CgenBinding* b = &scope->bindings.data[i];
-    if (b->start == name.start && b->length == name.length) return b->uid;
+    if (b->start == name.start && b->length == name.length)
+      return b->uid;
   }
   return scope_bind(g, scope, name);
 }
 
-static bool scope_lookup(CGen* g, CgenScope* scope, Token name, int* outUid,
-                         int* outFunc) {
+static bool scope_lookup(CGen* g, CgenScope* scope, Token name, int* outUid, int* outFunc) {
   (void)g;
   for (CgenScope* s = scope; s != NULL; s = s->parent) {
     // Backwards: a later declaration in the same scope shadows earlier ones,
@@ -293,33 +314,42 @@ static RStmt* resolve_stmt(CGen* g, CgenScope* scope, Stmt* s);
 static RStmtList resolve_list(CGen* g, CgenScope* scope, StmtList stmts);
 
 static RExpr* resolve_expr(CGen* g, CgenScope* scope, Expr* e) {
-  if (g->hadError) return NULL;
+  if (g->hadError)
+    return NULL;
   match(*e) {
-    of(Literal, value) { return newRExpr(g, RLiteral(*value)); }
+    of(Literal, value) {
+      return newRExpr(g, RLiteral(*value));
+    }
     of(Assign, name, val) {
       // Unresolvable targets lower to a runtime abort (parity with the
       // VM's OP_SET_GLOBAL failure); the value still evaluates first.
       int uid = -1, declFunc = -1;
       scope_lookup(g, scope, *name, &uid, &declFunc);
       RExpr* value = resolve_expr(g, scope, *val);
-      if (g->hadError) return NULL;
-      if (uid >= 0) record_use(g, uid, declFunc, scope->funcId);
+      if (g->hadError)
+        return NULL;
+      if (uid >= 0)
+        record_use(g, uid, declFunc, scope->funcId);
       return newRExpr(g, RAssign(*name, uid, value));
     }
     of(Binary, left, op, right) {
       RExpr* l = resolve_expr(g, scope, *left);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       RExpr* r = resolve_expr(g, scope, *right);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRExpr(g, RBinary(l, *op, r));
     }
     of(Call, callee, paren, args) {
       RExpr* c = resolve_expr(g, scope, *callee);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       RExprList rargs = {0};
       for (isize i = 0; i < args->len; i++) {
         RExpr* a = resolve_expr(g, scope, args->data[i]);
-        if (g->hadError) return NULL;
+        if (g->hadError)
+          return NULL;
         Push(g->arena, &rargs, a);
       }
       return newRExpr(g, RCall(c, *paren, rargs));
@@ -331,14 +361,17 @@ static RExpr* resolve_expr(CGen* g, CgenScope* scope, Expr* e) {
     }
     of(Grouping, inner) {
       RExpr* x = resolve_expr(g, scope, *inner);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRExpr(g, RGrouping(x));
     }
     of(Logical, left, op, right) {
       RExpr* l = resolve_expr(g, scope, *left);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       RExpr* r = resolve_expr(g, scope, *right);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRExpr(g, RLogical(l, *op, r));
     }
     of(Set, object, name, value) {
@@ -358,7 +391,8 @@ static RExpr* resolve_expr(CGen* g, CgenScope* scope, Expr* e) {
     }
     of(Unary, op, right) {
       RExpr* x = resolve_expr(g, scope, *right);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRExpr(g, RUnary(*op, x));
     }
     of(Variable, name) {
@@ -366,7 +400,8 @@ static RExpr* resolve_expr(CGen* g, CgenScope* scope, Expr* e) {
       // OP_GET_GLOBAL failure (message + exit 70), even when unreachable.
       int uid = -1, declFunc = -1;
       scope_lookup(g, scope, *name, &uid, &declFunc);
-      if (uid >= 0) record_use(g, uid, declFunc, scope->funcId);
+      if (uid >= 0)
+        record_use(g, uid, declFunc, scope->funcId);
       return newRExpr(g, RVar(*name, uid));
     }
   }
@@ -392,14 +427,17 @@ static bool init_uses_uid(CGen* g, RExpr* e, int uid) {
     }
     of(RAssign, token, use, value) {
       (void)token;
-      if (*use == uid) return true;
+      if (*use == uid)
+        return true;
       return init_uses_uid(g, *value, uid);
     }
     of(RBinary, left, op, right) {
       (void)op;
       return init_uses_uid(g, *left, uid) || init_uses_uid(g, *right, uid);
     }
-    of(RGrouping, inner) { return init_uses_uid(g, *inner, uid); }
+    of(RGrouping, inner) {
+      return init_uses_uid(g, *inner, uid);
+    }
     of(RLogical, left, op, right) {
       (void)op;
       return init_uses_uid(g, *left, uid) || init_uses_uid(g, *right, uid);
@@ -410,9 +448,11 @@ static bool init_uses_uid(CGen* g, RExpr* e, int uid) {
     }
     of(RCall, callee, paren, args) {
       (void)paren;
-      if (init_uses_uid(g, *callee, uid)) return true;
+      if (init_uses_uid(g, *callee, uid))
+        return true;
       for (isize i = 0; i < args->len; i++) {
-        if (init_uses_uid(g, args->data[i], uid)) return true;
+        if (init_uses_uid(g, args->data[i], uid))
+          return true;
       }
       return false;
     }
@@ -421,11 +461,13 @@ static bool init_uses_uid(CGen* g, RExpr* e, int uid) {
 }
 
 static RStmt* resolve_stmt(CGen* g, CgenScope* scope, Stmt* s) {
-  if (g->hadError) return NULL;
+  if (g->hadError)
+    return NULL;
   match(*s) {
     of(Block, statements) {
       RStmtList body = resolve_list(g, new_scope(g, scope, scope->funcId), *statements);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRStmt(g, RBlock(body));
     }
     of(Class, name, superclass, methods) {
@@ -436,50 +478,59 @@ static RStmt* resolve_stmt(CGen* g, CgenScope* scope, Stmt* s) {
     }
     of(Expression, expression) {
       RExpr* x = resolve_expr(g, scope, *expression);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRStmt(g, RExpression(x));
     }
     of(Function, name, params, body) {
       // Bound in the enclosing scope before resolving the body so the
       // function can recurse. Top-level names may already be pre-bound.
       int uid = scope_reuse_or_bind(g, scope, *name);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       int fid = ++g->funcCount;
       Push(g->arena, &g->funcParent, scope->funcId);
       CgenScope* fscope = new_scope(g, scope, fid);
       CgenParamList rparams = {0};
       for (isize i = 0; i < params->len; i++) {
         int puid = scope_bind(g, fscope, params->data[i]);
-        if (g->hadError) return NULL;
+        if (g->hadError)
+          return NULL;
         CgenParam p = {params->data[i], puid};
         Push(g->arena, &rparams, p);
       }
       RStmtList rbody = resolve_list(g, fscope, *body);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRStmt(g, RFunDecl(*name, uid, fid, rparams, rbody));
     }
     of(If, condition, thenBranch, elseBranch) {
       RExpr* cond = resolve_expr(g, scope, *condition);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       RStmt* thenB = resolve_branch(g, scope, *thenBranch);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       RStmt* elseB = NULL;
       if (*elseBranch != NULL) {
         elseB = resolve_branch(g, scope, *elseBranch);
-        if (g->hadError) return NULL;
+        if (g->hadError)
+          return NULL;
       }
       return newRStmt(g, RIf(cond, thenB, elseB));
     }
     of(Print, expression) {
       RExpr* x = resolve_expr(g, scope, *expression);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRStmt(g, RPrint(x));
     }
     of(Return, keyword, value) {
       RExpr* v = NULL;
       if (*value != NULL) {
         v = resolve_expr(g, scope, *value);
-        if (g->hadError) return NULL;
+        if (g->hadError)
+          return NULL;
       }
       return newRStmt(g, RReturn(*keyword, v));
     }
@@ -491,20 +542,24 @@ static RStmt* resolve_stmt(CGen* g, CgenScope* scope, Stmt* s) {
         RExpr* init = NULL;
         if (*initializer != NULL) {
           init = resolve_expr(g, scope, *initializer);
-          if (g->hadError) return NULL;
+          if (g->hadError)
+            return NULL;
         }
         int uid = scope_bind(g, scope, *name);
-        if (g->hadError) return NULL;
+        if (g->hadError)
+          return NULL;
         return newRStmt(g, RVarDecl(*name, uid, init));
       }
       // Local scope: bind first (mirror declareVariable), so the
       // initializer sees the variable itself as uninitialized...
       int uid = scope_bind(g, scope, *name);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       RExpr* init = NULL;
       if (*initializer != NULL) {
         init = resolve_expr(g, scope, *initializer);
-        if (g->hadError) return NULL;
+        if (g->hadError)
+          return NULL;
         if (init_uses_uid(g, init, uid)) {
           cgen_error(g, name->line, "Can't read local variable in its own initializer.");
           return NULL;
@@ -514,9 +569,11 @@ static RStmt* resolve_stmt(CGen* g, CgenScope* scope, Stmt* s) {
     }
     of(While, condition, body) {
       RExpr* cond = resolve_expr(g, scope, *condition);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       RStmt* b = resolve_branch(g, scope, *body);
-      if (g->hadError) return NULL;
+      if (g->hadError)
+        return NULL;
       return newRStmt(g, RWhile(cond, b, (RStmtList){0}));
     }
   }
@@ -527,7 +584,8 @@ static RStmtList resolve_list(CGen* g, CgenScope* scope, StmtList stmts) {
   RStmtList out = {0};
   for (isize i = 0; i < stmts.len; i++) {
     RStmt* s = resolve_stmt(g, scope, stmts.data[i]);
-    if (g->hadError) return (RStmtList){0};
+    if (g->hadError)
+      return (RStmtList){0};
     Push(g->arena, &out, s);
   }
   return out;
@@ -560,7 +618,8 @@ static Token bang_token(int line) {
 
 static RStmtList concat_pre(CGen* g, RStmtList a, RStmtList b) {
   RStmtList out = a;
-  for (isize i = 0; i < b.len; i++) Push(g->arena, &out, b.data[i]);
+  for (isize i = 0; i < b.len; i++)
+    Push(g->arena, &out, b.data[i]);
   return out;
 }
 
@@ -588,7 +647,9 @@ static bool expr_has_effect(CGen* g, RExpr* e) {
       (void)op;
       return expr_has_effect(g, *left) || expr_has_effect(g, *right);
     }
-    of(RGrouping, inner) { return expr_has_effect(g, *inner); }
+    of(RGrouping, inner) {
+      return expr_has_effect(g, *inner);
+    }
     of(RLogical, left, op, right) {
       (void)left;
       (void)op;
@@ -621,7 +682,8 @@ static RExpr* spill_to_tmp(CGen* g, RStmtList* pre, RExpr* e, int line) {
 
 static LoweredExpr lower_expr(CGen* g, RExpr* e) {
   LoweredExpr fail = {{0}, NULL};
-  if (g->hadError) return fail;
+  if (g->hadError)
+    return fail;
   match(*e) {
     of(RLiteral, value) {
       (void)value;
@@ -636,70 +698,82 @@ static LoweredExpr lower_expr(CGen* g, RExpr* e) {
     }
     of(RAssign, token, uid, value) {
       LoweredExpr v = lower_expr(g, *value);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       LoweredExpr out = {v.pre, newRExpr(g, RAssign(*token, *uid, v.expr))};
       return out;
     }
     of(RBinary, left, op, right) {
       LoweredExpr l = lower_expr(g, *left);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       RStmtList pre = l.pre;
       RExpr* le = l.expr;
-      if (expr_has_effect(g, le)) le = spill_to_tmp(g, &pre, le, op->line);
+      if (expr_has_effect(g, le))
+        le = spill_to_tmp(g, &pre, le, op->line);
       LoweredExpr r = lower_expr(g, *right);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       pre = concat_pre(g, pre, r.pre);
       RExpr* re = r.expr;
-      if (expr_has_effect(g, re)) re = spill_to_tmp(g, &pre, re, op->line);
+      if (expr_has_effect(g, re))
+        re = spill_to_tmp(g, &pre, re, op->line);
       LoweredExpr out = {pre, newRExpr(g, RBinary(le, *op, re))};
       return out;
     }
     of(RGrouping, inner) {
       LoweredExpr x = lower_expr(g, *inner);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       LoweredExpr out = {x.pre, newRExpr(g, RGrouping(x.expr))};
       return out;
     }
     of(RLogical, left, op, right) {
       int line = op->line;
       LoweredExpr l = lower_expr(g, *left);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       Token tt = tmp_token(line);
       int tmp = new_uid(g, -1, tt, false);
       RStmtList pre = l.pre;
       Push(g->arena, &pre, newRStmt(g, RVarDecl(tt, tmp, l.expr)));
       LoweredExpr r = lower_expr(g, *right);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       RExpr* tref = newRExpr(g, RVar(tt, tmp));
       // Emitter wraps conditions as `if (!is_falsey(cond))`, so `and`
       // enters on a bare (truthy) temp while `or` enters on `!temp`.
       RExpr* test = (op->type == TOKEN_AND) ? tref : newRExpr(g, RUnary(bang_token(line), tref));
       RStmtList thenBody = r.pre;
-      Push(g->arena, &thenBody,
-           newRStmt(g, RExpression(newRExpr(g, RAssign(tt, tmp, r.expr)))));
+      Push(g->arena, &thenBody, newRStmt(g, RExpression(newRExpr(g, RAssign(tt, tmp, r.expr)))));
       Push(g->arena, &pre, newRStmt(g, RIf(test, newRStmt(g, RBlock(thenBody)), NULL)));
       LoweredExpr out = {pre, newRExpr(g, RVar(tt, tmp))};
       return out;
     }
     of(RUnary, op, right) {
       LoweredExpr x = lower_expr(g, *right);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       LoweredExpr out = {x.pre, newRExpr(g, RUnary(*op, x.expr))};
       return out;
     }
     of(RCall, callee, paren, args) {
       LoweredExpr c = lower_expr(g, *callee);
-      if (g->hadError) return fail;
+      if (g->hadError)
+        return fail;
       RStmtList pre = c.pre;
       RExpr* ce = c.expr;
-      if (expr_has_effect(g, ce)) ce = spill_to_tmp(g, &pre, ce, paren->line);
+      if (expr_has_effect(g, ce))
+        ce = spill_to_tmp(g, &pre, ce, paren->line);
       RExprList rargs = {0};
       for (isize i = 0; i < args->len; i++) {
         LoweredExpr a = lower_expr(g, args->data[i]);
-        if (g->hadError) return fail;
+        if (g->hadError)
+          return fail;
         pre = concat_pre(g, pre, a.pre);
         RExpr* ae = a.expr;
-        if (expr_has_effect(g, ae)) ae = spill_to_tmp(g, &pre, ae, paren->line);
+        if (expr_has_effect(g, ae))
+          ae = spill_to_tmp(g, &pre, ae, paren->line);
         Push(g->arena, &rargs, ae);
       }
       LoweredExpr out = {pre, newRExpr(g, RCall(ce, *paren, rargs))};
@@ -716,7 +790,8 @@ static RStmtList lower_body(CGen* g, RStmtList* stmts) {
   RStmtList out = {0};
   for (isize i = 0; i < stmts->len; i++) {
     RStmtList one = lower_stmt(g, stmts->data[i]);
-    if (g->hadError) return (RStmtList){0};
+    if (g->hadError)
+      return (RStmtList){0};
     out = concat_pre(g, out, one);
   }
   return out;
@@ -725,43 +800,49 @@ static RStmtList lower_body(CGen* g, RStmtList* stmts) {
 // Statements lower to a spliced list; branches normalize to Blocks.
 static RStmtList lower_stmt(CGen* g, RStmt* s) {
   RStmtList out = {0};
-  if (g->hadError) return out;
+  if (g->hadError)
+    return out;
   match(*s) {
     of(RBlock, statements) {
       RStmtList body = lower_body(g, statements);
-      if (g->hadError) return (RStmtList){0};
+      if (g->hadError)
+        return (RStmtList){0};
       Push(g->arena, &out, newRStmt(g, RBlock(body)));
     }
     of(RExpression, expression) {
       LoweredExpr x = lower_expr(g, *expression);
-      if (g->hadError) return (RStmtList){0};
+      if (g->hadError)
+        return (RStmtList){0};
       out = concat_pre(g, x.pre, out);
       Push(g->arena, &out, newRStmt(g, RExpression(x.expr)));
     }
     of(RFunDecl, name, uid, funcId, params, body) {
       RStmtList rbody = lower_body(g, body);
-      if (g->hadError) return (RStmtList){0};
-      Push(g->arena, &out,
-           newRStmt(g, RFunDecl(*name, *uid, *funcId, *params, rbody)));
+      if (g->hadError)
+        return (RStmtList){0};
+      Push(g->arena, &out, newRStmt(g, RFunDecl(*name, *uid, *funcId, *params, rbody)));
     }
     of(RIf, condition, thenBranch, elseBranch) {
       LoweredExpr c = lower_expr(g, *condition);
-      if (g->hadError) return (RStmtList){0};
+      if (g->hadError)
+        return (RStmtList){0};
       RStmtList tb = lower_stmt(g, *thenBranch);
-      if (g->hadError) return (RStmtList){0};
+      if (g->hadError)
+        return (RStmtList){0};
       RStmt* elseB = NULL;
       if (*elseBranch != NULL) {
         RStmtList eb = lower_stmt(g, *elseBranch);
-        if (g->hadError) return (RStmtList){0};
+        if (g->hadError)
+          return (RStmtList){0};
         elseB = newRStmt(g, RBlock(eb));
       }
       out = concat_pre(g, c.pre, out);
-      Push(g->arena, &out,
-           newRStmt(g, RIf(c.expr, newRStmt(g, RBlock(tb)), elseB)));
+      Push(g->arena, &out, newRStmt(g, RIf(c.expr, newRStmt(g, RBlock(tb)), elseB)));
     }
     of(RPrint, expression) {
       LoweredExpr x = lower_expr(g, *expression);
-      if (g->hadError) return (RStmtList){0};
+      if (g->hadError)
+        return (RStmtList){0};
       out = concat_pre(g, x.pre, out);
       Push(g->arena, &out, newRStmt(g, RPrint(x.expr)));
     }
@@ -770,7 +851,8 @@ static RStmtList lower_stmt(CGen* g, RStmt* s) {
         Push(g->arena, &out, s);
       } else {
         LoweredExpr x = lower_expr(g, *value);
-        if (g->hadError) return (RStmtList){0};
+        if (g->hadError)
+          return (RStmtList){0};
         out = concat_pre(g, x.pre, out);
         Push(g->arena, &out, newRStmt(g, RReturn(*keyword, x.expr)));
       }
@@ -780,7 +862,8 @@ static RStmtList lower_stmt(CGen* g, RStmt* s) {
         Push(g->arena, &out, s);
       } else {
         LoweredExpr x = lower_expr(g, *initializer);
-        if (g->hadError) return (RStmtList){0};
+        if (g->hadError)
+          return (RStmtList){0};
         out = concat_pre(g, x.pre, out);
         Push(g->arena, &out, newRStmt(g, RVarDecl(*token, *uid, x.expr)));
       }
@@ -788,13 +871,14 @@ static RStmtList lower_stmt(CGen* g, RStmt* s) {
     of(RWhile, condition, body, pre) {
       (void)pre;
       LoweredExpr c = lower_expr(g, *condition);
-      if (g->hadError) return (RStmtList){0};
+      if (g->hadError)
+        return (RStmtList){0};
       RStmtList bb = lower_stmt(g, *body);
-      if (g->hadError) return (RStmtList){0};
+      if (g->hadError)
+        return (RStmtList){0};
       // Condition pre-statements stay INSIDE the loop: they re-evaluate
       // every iteration (logical operators lower to temp + branch).
-      Push(g->arena, &out,
-           newRStmt(g, RWhile(c.expr, newRStmt(g, RBlock(bb)), c.pre)));
+      Push(g->arena, &out, newRStmt(g, RWhile(c.expr, newRStmt(g, RBlock(bb)), c.pre)));
     }
   }
   return out;
@@ -803,7 +887,8 @@ static RStmtList lower_stmt(CGen* g, RStmt* s) {
 // ---- Pass 4: emit-c (L_flat -> C text, via arena astr) ----
 
 static bool in_subtree(CGen* g, int f, int root) {
-  while (f != root && f > 0) f = g->funcParent.data[f - 1];
+  while (f != root && f > 0)
+    f = g->funcParent.data[f - 1];
   return f == root;
 }
 
@@ -818,9 +903,12 @@ static CgenEnvList build_envs(CGen* g) {
     for (isize i = 0; i < g->useUid.len; i++) {
       int uid = g->useUid.data[i];
       int user = g->useFunc.data[i];
-      if (uid <= 0 || !in_subtree(g, user, fid)) continue;
-      if (uid_is_global(g, uid)) continue;
-      if (in_subtree(g, uid_func(g, uid), fid)) continue;
+      if (uid <= 0 || !in_subtree(g, user, fid))
+        continue;
+      if (uid_is_global(g, uid))
+        continue;
+      if (in_subtree(g, uid_func(g, uid), fid))
+        continue;
       bool seen = false;
       for (isize j = 0; j < e.uids.len; j++) {
         if (e.uids.data[j] == uid) {
@@ -828,7 +916,8 @@ static CgenEnvList build_envs(CGen* g) {
           break;
         }
       }
-      if (!seen) Push(g->arena, &e.uids, uid);
+      if (!seen)
+        Push(g->arena, &e.uids, uid);
     }
     Push(g->arena, &envs, e);
   }
@@ -837,9 +926,11 @@ static CgenEnvList build_envs(CGen* g) {
 
 static int env_index(CgenEnvList* envs, int funcId, int uid) {
   for (isize i = 0; i < envs->len; i++) {
-    if (envs->data[i].funcId != funcId) continue;
+    if (envs->data[i].funcId != funcId)
+      continue;
     for (isize j = 0; j < envs->data[i].uids.len; j++) {
-      if (envs->data[i].uids.data[j] == uid) return (int)j;
+      if (envs->data[i].uids.data[j] == uid)
+        return (int)j;
     }
   }
   return -1;
@@ -847,7 +938,8 @@ static int env_index(CgenEnvList* envs, int funcId, int uid) {
 
 static int env_count(CgenEnvList* envs, int funcId) {
   for (isize i = 0; i < envs->len; i++) {
-    if (envs->data[i].funcId == funcId) return (int)envs->data[i].uids.len;
+    if (envs->data[i].funcId == funcId)
+      return (int)envs->data[i].uids.len;
   }
   return 0;
 }
@@ -859,7 +951,8 @@ static bool is_tmp(Token tok) {
 static astr emit_cstring(CGen* g, const char* chars, int length);
 
 static astr emit_name(CGen* g, Token tok, int uid) {
-  if (is_tmp(tok)) return astr_format(g->arena, "_lox_t%d", uid);
+  if (is_tmp(tok))
+    return astr_format(g->arena, "_lox_t%d", uid);
   return astr_format(g->arena, "_lox_%.*s_%d", tok.length, tok.start, uid);
 }
 
@@ -883,7 +976,8 @@ static astr emit_var_read(CGen* g, Token tok, int uid) {
     out = astr_concat(g->arena, out, emit_cstring(g, tok.start, tok.length));
     return astr_concat(g->arena, out, astr_format(g->arena, ", %d))", tok.line));
   }
-  if (is_tmp(tok)) return emit_name(g, tok, uid);
+  if (is_tmp(tok))
+    return emit_name(g, tok, uid);
   if (uid_func(g, uid) == g->emitFunc) {
     if (uid_is_boxed(g, uid)) {
       astr out = emit_name(g, tok, uid);
@@ -960,19 +1054,47 @@ static astr emit_cell_ptr(CGen* g, int uid) {
 
 static astr emit_indent(CGen* g, int depth) {
   astr out = {0};
-  for (int i = 0; i < depth; i++) out = astr_concat(g->arena, out, astr("  "));
+  for (int i = 0; i < depth; i++)
+    out = astr_concat(g->arena, out, astr("  "));
   return out;
+}
+
+typedef Slice(astr) AstrParts;
+
+// Join rendered parts with a single allocation. Statement-list loops must
+// use this (not repeated astr_concat, which clones the whole output per
+// append and goes quadratic in program size).
+static astr join_parts(CGen* g, AstrParts* parts) {
+  isize total = 0;
+  for (isize i = 0; i < parts->len; i++)
+    total += parts->data[i].len;
+  char* buf = New(g->arena, char, total, NO_INIT);
+  isize off = 0;
+  for (isize i = 0; i < parts->len; i++) {
+    memcpy(buf + off, parts->data[i].data, (size_t)parts->data[i].len);
+    off += parts->data[i].len;
+  }
+  return (astr){buf, total};
+}
+
+static void push_part(CGen* g, AstrParts* parts, astr part) {
+  Push(g->arena, parts, part);
 }
 
 static astr emit_cstring(CGen* g, const char* chars, int length) {
   astr out = astr("\"");
   for (int i = 0; i < length; i++) {
     unsigned char c = (unsigned char)chars[i];
-    if (c == '"') out = astr_concat(g->arena, out, astr("\\\""));
-    else if (c == '\\') out = astr_concat(g->arena, out, astr("\\\\"));
-    else if (c == '\n') out = astr_concat(g->arena, out, astr("\\n"));
-    else if (c >= 0x20 && c <= 0x7e) out = astr_concat(g->arena, out, astr_format(g->arena, "%c", c));
-    else out = astr_concat(g->arena, out, astr_format(g->arena, "\\%03o", c));
+    if (c == '"')
+      out = astr_concat(g->arena, out, astr("\\\""));
+    else if (c == '\\')
+      out = astr_concat(g->arena, out, astr("\\\\"));
+    else if (c == '\n')
+      out = astr_concat(g->arena, out, astr("\\n"));
+    else if (c >= 0x20 && c <= 0x7e)
+      out = astr_concat(g->arena, out, astr_format(g->arena, "%c", c));
+    else
+      out = astr_concat(g->arena, out, astr_format(g->arena, "\\%03o", c));
   }
   return astr_concat(g->arena, out, astr("\""));
 }
@@ -1002,9 +1124,11 @@ static astr emit_expr(CGen* g, RExpr* e);
 
 static astr emit_binary(CGen* g, RExpr* l, Token op, RExpr* r) {
   astr la = emit_expr(g, l);
-  if (g->hadError) return (astr){0};
+  if (g->hadError)
+    return (astr){0};
   astr ra = emit_expr(g, r);
-  if (g->hadError) return (astr){0};
+  if (g->hadError)
+    return (astr){0};
   switch (op.type) {
     case TOKEN_BANG_EQUAL: {
       astr out = astr("lox_not(lox_equal(");
@@ -1033,13 +1157,28 @@ static astr emit_binary(CGen* g, RExpr* l, Token op, RExpr* r) {
       const char* helper = NULL;
       bool needsLine = true;
       switch (op.type) {
-        case TOKEN_PLUS: helper = "lox_add"; break;
-        case TOKEN_MINUS: helper = "lox_sub"; break;
-        case TOKEN_STAR: helper = "lox_mul"; break;
-        case TOKEN_SLASH: helper = "lox_div"; break;
-        case TOKEN_EQUAL_EQUAL: helper = "lox_equal"; needsLine = false; break;
-        case TOKEN_GREATER: helper = "lox_greater"; break;
-        case TOKEN_LESS: helper = "lox_less"; break;
+        case TOKEN_PLUS:
+          helper = "lox_add";
+          break;
+        case TOKEN_MINUS:
+          helper = "lox_sub";
+          break;
+        case TOKEN_STAR:
+          helper = "lox_mul";
+          break;
+        case TOKEN_SLASH:
+          helper = "lox_div";
+          break;
+        case TOKEN_EQUAL_EQUAL:
+          helper = "lox_equal";
+          needsLine = false;
+          break;
+        case TOKEN_GREATER:
+          helper = "lox_greater";
+          break;
+        case TOKEN_LESS:
+          helper = "lox_less";
+          break;
         default:
           cgen_error(g, op.line, "internal: bad binary operator");
           return (astr){0};
@@ -1048,25 +1187,32 @@ static astr emit_binary(CGen* g, RExpr* l, Token op, RExpr* r) {
       out = astr_concat(g->arena, out, la);
       out = astr_concat(g->arena, out, astr(", "));
       out = astr_concat(g->arena, out, ra);
-      if (needsLine) out = astr_concat(g->arena, out, astr_format(g->arena, ", %d", op.line));
+      if (needsLine)
+        out = astr_concat(g->arena, out, astr_format(g->arena, ", %d", op.line));
       return astr_concat(g->arena, out, astr(")"));
     }
   }
 }
 
 static astr emit_expr(CGen* g, RExpr* e) {
-  if (g->hadError) return (astr){0};
+  if (g->hadError)
+    return (astr){0};
   match(*e) {
-    of(RLiteral, value) { return emit_value(g, *value); }
+    of(RLiteral, value) {
+      return emit_value(g, *value);
+    }
     of(RVar, token, uid) {
       return emit_var_read(g, *token, *uid);
     }
     of(RAssign, token, uid, value) {
       astr rhs = emit_expr(g, *value);
-      if (g->hadError) return (astr){0};
+      if (g->hadError)
+        return (astr){0};
       return emit_assign(g, *token, *uid, rhs);
     }
-    of(RBinary, left, op, right) { return emit_binary(g, *left, *op, *right); }
+    of(RBinary, left, op, right) {
+      return emit_binary(g, *left, *op, *right);
+    }
     of(RGrouping, inner) {
       astr out = astr("(");
       out = astr_concat(g->arena, out, emit_expr(g, *inner));
@@ -1095,19 +1241,20 @@ static astr emit_expr(CGen* g, RExpr* e) {
     }
     of(RCall, callee, paren, args) {
       astr c = emit_expr(g, *callee);
-      if (g->hadError) return (astr){0};
+      if (g->hadError)
+        return (astr){0};
       if (args->len == 0) {
-        return astr_format(g->arena, "lox_call(%.*s, (Value*)0, 0, %d)", (int)c.len,
-                           c.data, paren->line);
+        return astr_format(g->arena, "lox_call(%.*s, (Value*)0, 0, %d)", (int)c.len, c.data, paren->line);
       }
       astr out = astr_format(g->arena, "lox_call(%.*s, (Value[]){", (int)c.len, c.data);
       for (isize i = 0; i < args->len; i++) {
-        if (i > 0) out = astr_concat(g->arena, out, astr(", "));
+        if (i > 0)
+          out = astr_concat(g->arena, out, astr(", "));
         out = astr_concat(g->arena, out, emit_expr(g, args->data[i]));
-        if (g->hadError) return (astr){0};
+        if (g->hadError)
+          return (astr){0};
       }
-      return astr_concat(g->arena, out,
-                         astr_format(g->arena, "}, %d, %d)", (int)args->len, paren->line));
+      return astr_concat(g->arena, out, astr_format(g->arena, "}, %d, %d)", (int)args->len, paren->line));
     }
   }
   return (astr){0}; /* unreachable */
@@ -1117,20 +1264,29 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth);
 
 static astr emit_block_body(CGen* g, RStmtList* statements, int depth) {
   astr out = astr("{\n");
+  AstrParts parts = {0};
+  push_part(g, &parts, out);
   for (isize i = 0; i < statements->len; i++) {
-    out = astr_concat(g->arena, out, emit_stmt(g, statements->data[i], depth + 1));
-    if (g->hadError) return (astr){0};
-    out = astr_concat(g->arena, out, astr("\n"));
+    astr one = emit_stmt(g, statements->data[i], depth + 1);
+    if (g->hadError)
+      return (astr){0};
+    push_part(g, &parts, one);
+    push_part(g, &parts, astr("\n"));
   }
-  out = astr_concat(g->arena, out, emit_indent(g, depth));
-  return astr_concat(g->arena, out, astr("}"));
+  push_part(g, &parts, emit_indent(g, depth));
+  push_part(g, &parts, astr("}"));
+  return join_parts(g, &parts);
 }
 
 // Branches are Blocks after lowering; a bare stmt still emits correctly.
 static astr emit_branch(CGen* g, RStmt* s, int depth) {
   match(*s) {
-    of(RBlock, statements) { return emit_block_body(g, statements, depth); }
-    of(RExpression, expression) { (void)expression; }
+    of(RBlock, statements) {
+      return emit_block_body(g, statements, depth);
+    }
+    of(RExpression, expression) {
+      (void)expression;
+    }
     of(RFunDecl, name, uid, funcId, params, body) {
       (void)name;
       (void)uid;
@@ -1143,7 +1299,9 @@ static astr emit_branch(CGen* g, RStmt* s, int depth) {
       (void)thenBranch;
       (void)elseBranch;
     }
-    of(RPrint, expression) { (void)expression; }
+    of(RPrint, expression) {
+      (void)expression;
+    }
     of(RReturn, keyword, value) {
       (void)keyword;
       (void)value;
@@ -1163,21 +1321,28 @@ static astr emit_branch(CGen* g, RStmt* s, int depth) {
 }
 
 static astr emit_stmt(CGen* g, RStmt* s, int depth) {
-  if (g->hadError) return (astr){0};
+  if (g->hadError)
+    return (astr){0};
   astr ind = emit_indent(g, depth);
   match(*s) {
     of(RBlock, statements) {
-      astr out = astr_concat(g->arena, ind, astr("{\n"));
+      AstrParts parts = {0};
+      push_part(g, &parts, astr_concat(g->arena, ind, astr("{\n")));
       for (isize i = 0; i < statements->len; i++) {
-        out = astr_concat(g->arena, out, emit_stmt(g, statements->data[i], depth + 1));
-        out = astr_concat(g->arena, out, astr("\n"));
+        astr one = emit_stmt(g, statements->data[i], depth + 1);
+        if (g->hadError)
+          return (astr){0};
+        push_part(g, &parts, one);
+        push_part(g, &parts, astr("\n"));
       }
-      out = astr_concat(g->arena, out, emit_indent(g, depth));
-      return astr_concat(g->arena, out, astr("}"));
+      push_part(g, &parts, emit_indent(g, depth));
+      push_part(g, &parts, astr("}"));
+      return join_parts(g, &parts);
     }
     of(RExpression, expression) {
       astr out = astr_concat(g->arena, ind, emit_expr(g, *expression));
-      if (g->hadError) return (astr){0};
+      if (g->hadError)
+        return (astr){0};
       return astr_concat(g->arena, out, astr(";"));
     }
     of(RFunDecl, name, uid, funcId, params, body) {
@@ -1198,9 +1363,10 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
         code = astr_concat(g->arena, code, astr(" = lox_newcell(NIL_VAL);\n"));
         code = astr_concat(g->arena, code, ind);
       }
-      code = astr_concat(g->arena, code,
-                         astr_format(g->arena, "ObjCFun* _lox_cf_%d = newCFun(\"%.*s\", %d, %d, lox_fn_%d, %d);\n",
-                                     *uid, name->length, name->start, name->length, arity, *uid, nup));
+      code = astr_concat(
+          g->arena, code,
+          astr_format(g->arena, "ObjCFun* _lox_cf_%d = newCFun(\"%.*s\", %d, %d, lox_fn_%d, %d);\n", *uid,
+                      name->length, name->start, name->length, arity, *uid, nup));
       for (int k = 0; k < nup; k++) {
         int cap = 0;
         for (isize i = 0; i < g->envs.len; i++) {
@@ -1210,36 +1376,34 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
           }
         }
         code = astr_concat(g->arena, code, ind);
-        code = astr_concat(g->arena, code,
-                           astr_format(g->arena, "_lox_cf_%d->upvalues[%d] = ", *uid, k));
+        code = astr_concat(g->arena, code, astr_format(g->arena, "_lox_cf_%d->upvalues[%d] = ", *uid, k));
         code = astr_concat(g->arena, code, emit_cell_ptr(g, cap));
-        if (g->hadError) return (astr){0};
+        if (g->hadError)
+          return (astr){0};
         code = astr_concat(g->arena, code, astr(";\n"));
       }
       code = astr_concat(g->arena, code, ind);
       if (boxed) {
         code = astr_concat(g->arena, code, emit_name(g, *name, *uid));
-        code = astr_concat(g->arena, code,
-                           astr_format(g->arena, "->value = OBJ_VAL(_lox_cf_%d);", *uid));
+        code = astr_concat(g->arena, code, astr_format(g->arena, "->value = OBJ_VAL(_lox_cf_%d);", *uid));
       } else if (isGlobal) {
         code = astr_concat(g->arena, code, emit_name(g, *name, *uid));
-        code = astr_concat(g->arena, code,
-                           astr_format(g->arena, " = OBJ_VAL(_lox_cf_%d);\n", *uid));
+        code = astr_concat(g->arena, code, astr_format(g->arena, " = OBJ_VAL(_lox_cf_%d);\n", *uid));
         code = astr_concat(g->arena, code, ind);
         code = astr_concat(g->arena, code, emit_dname(g, *name, *uid));
         code = astr_concat(g->arena, code, astr(" = true;"));
       } else {
         code = astr_concat(g->arena, code, astr("Value "));
         code = astr_concat(g->arena, code, emit_name(g, *name, *uid));
-        code = astr_concat(g->arena, code,
-                           astr_format(g->arena, " = OBJ_VAL(_lox_cf_%d);", *uid));
+        code = astr_concat(g->arena, code, astr_format(g->arena, " = OBJ_VAL(_lox_cf_%d);", *uid));
       }
       return code;
     }
     of(RIf, condition, thenBranch, elseBranch) {
       astr out = astr_concat(g->arena, ind, astr("if (!lox_is_falsey("));
       out = astr_concat(g->arena, out, emit_expr(g, *condition));
-      if (g->hadError) return (astr){0};
+      if (g->hadError)
+        return (astr){0};
       out = astr_concat(g->arena, out, astr(")) "));
       out = astr_concat(g->arena, out, emit_branch(g, *thenBranch, depth));
       if (*elseBranch != NULL) {
@@ -1251,7 +1415,8 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
     of(RPrint, expression) {
       astr out = astr_concat(g->arena, ind, astr("lox_print("));
       out = astr_concat(g->arena, out, emit_expr(g, *expression));
-      if (g->hadError) return (astr){0};
+      if (g->hadError)
+        return (astr){0};
       return astr_concat(g->arena, out, astr(");"));
     }
     of(RReturn, keyword, value) {
@@ -1259,7 +1424,8 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
       astr out = astr_concat(g->arena, ind, astr("return "));
       if (*value != NULL) {
         out = astr_concat(g->arena, out, emit_expr(g, *value));
-        if (g->hadError) return (astr){0};
+        if (g->hadError)
+          return (astr){0};
       } else {
         out = astr_concat(g->arena, out, astr("NIL_VAL"));
       }
@@ -1271,7 +1437,8 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
       astr init = astr("NIL_VAL");
       if (*initializer != NULL) {
         init = emit_expr(g, *initializer);
-        if (g->hadError) return (astr){0};
+        if (g->hadError)
+          return (astr){0};
       }
       if (isGlobal) {
         astr out = astr_concat(g->arena, ind, emit_name(g, *token, *uid));
@@ -1297,22 +1464,26 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
       return astr_concat(g->arena, out, astr(";"));
     }
     of(RWhile, condition, body, pre) {
-      astr out = astr_concat(g->arena, ind, astr("for (;;) {\n"));
+      AstrParts parts = {0};
+      push_part(g, &parts, astr_concat(g->arena, ind, astr("for (;;) {\n")));
       for (isize i = 0; i < pre->len; i++) {
-        out = astr_concat(g->arena, out, emit_stmt(g, pre->data[i], depth + 1));
-        if (g->hadError) return (astr){0};
-        out = astr_concat(g->arena, out, astr("\n"));
+        push_part(g, &parts, emit_stmt(g, pre->data[i], depth + 1));
+        if (g->hadError)
+          return (astr){0};
+        push_part(g, &parts, astr("\n"));
       }
-      out = astr_concat(g->arena, out, emit_indent(g, depth + 1));
-      out = astr_concat(g->arena, out, astr("if (lox_is_falsey("));
-      out = astr_concat(g->arena, out, emit_expr(g, *condition));
-      if (g->hadError) return (astr){0};
-      out = astr_concat(g->arena, out, astr(")) break;\n"));
-      out = astr_concat(g->arena, out, emit_indent(g, depth + 1));
-      out = astr_concat(g->arena, out, emit_branch(g, *body, depth + 1));
-      out = astr_concat(g->arena, out, astr("\n"));
-      out = astr_concat(g->arena, out, ind);
-      return astr_concat(g->arena, out, astr("}"));
+      push_part(g, &parts, emit_indent(g, depth + 1));
+      push_part(g, &parts, astr("if (lox_is_falsey("));
+      push_part(g, &parts, emit_expr(g, *condition));
+      if (g->hadError)
+        return (astr){0};
+      push_part(g, &parts, astr(")) break;\n"));
+      push_part(g, &parts, emit_indent(g, depth + 1));
+      push_part(g, &parts, emit_branch(g, *body, depth + 1));
+      push_part(g, &parts, astr("\n"));
+      push_part(g, &parts, ind);
+      push_part(g, &parts, astr("}"));
+      return join_parts(g, &parts);
     }
   }
   return (astr){0}; /* unreachable */
@@ -1332,13 +1503,18 @@ typedef Slice(CgenFun) CgenFunList;
 
 static void collect_funs_stmt(CGen* g, RStmt* s, CgenFunList* out);
 static void collect_funs_list(CGen* g, RStmtList* stmts, CgenFunList* out) {
-  for (isize i = 0; i < stmts->len; i++) collect_funs_stmt(g, stmts->data[i], out);
+  for (isize i = 0; i < stmts->len; i++)
+    collect_funs_stmt(g, stmts->data[i], out);
 }
 
 static void collect_funs_stmt(CGen* g, RStmt* s, CgenFunList* out) {
   match(*s) {
-    of(RBlock, statements) { collect_funs_list(g, statements, out); }
-    of(RExpression, expression) { (void)expression; }
+    of(RBlock, statements) {
+      collect_funs_list(g, statements, out);
+    }
+    of(RExpression, expression) {
+      (void)expression;
+    }
     of(RFunDecl, name, uid, funcId, params, body) {
       CgenFun f = {*name, *uid, *funcId, *params, *body};
       Push(g->arena, out, f);
@@ -1347,9 +1523,12 @@ static void collect_funs_stmt(CGen* g, RStmt* s, CgenFunList* out) {
     of(RIf, condition, thenBranch, elseBranch) {
       (void)condition;
       collect_funs_stmt(g, *thenBranch, out);
-      if (*elseBranch != NULL) collect_funs_stmt(g, *elseBranch, out);
+      if (*elseBranch != NULL)
+        collect_funs_stmt(g, *elseBranch, out);
     }
-    of(RPrint, expression) { (void)expression; }
+    of(RPrint, expression) {
+      (void)expression;
+    }
     of(RReturn, keyword, value) {
       (void)keyword;
       (void)value;
@@ -1362,15 +1541,15 @@ static void collect_funs_stmt(CGen* g, RStmt* s, CgenFunList* out) {
     of(RWhile, condition, body, pre) {
       (void)condition;
       collect_funs_stmt(g, *body, out);
-      for (isize i = 0; i < pre->len; i++) collect_funs_stmt(g, pre->data[i], out);
+      for (isize i = 0; i < pre->len; i++)
+        collect_funs_stmt(g, pre->data[i], out);
     }
   }
 }
 
 static astr emit_function(CGen* g, CgenFun* f) {
-  astr code = astr_format(g->arena,
-                          "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine) {\n",
-                          f->uid);
+  astr code = astr_format(
+      g->arena, "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine) {\n", f->uid);
   code = astr_concat(g->arena, code,
                      astr_format(g->arena, "  if (argCount != %d) lox_arity(callLine, %d, argCount);\n",
                                  (int)f->params.len, (int)f->params.len));
@@ -1380,8 +1559,7 @@ static astr emit_function(CGen* g, CgenFun* f) {
     if (uid_is_boxed(g, p->uid)) {
       code = astr_concat(g->arena, code, astr("  LoxCell* "));
       code = astr_concat(g->arena, code, emit_name(g, tok, p->uid));
-      code = astr_concat(g->arena, code,
-                         astr_format(g->arena, " = lox_newcell(args[%d]);\n", (int)i));
+      code = astr_concat(g->arena, code, astr_format(g->arena, " = lox_newcell(args[%d]);\n", (int)i));
     } else {
       code = astr_concat(g->arena, code, astr("  Value "));
       code = astr_concat(g->arena, code, emit_name(g, tok, p->uid));
@@ -1389,12 +1567,17 @@ static astr emit_function(CGen* g, CgenFun* f) {
     }
   }
   g->emitFunc = f->funcId;
+  AstrParts parts = {0};
+  push_part(g, &parts, code);
   for (isize i = 0; i < f->body.len; i++) {
-    code = astr_concat(g->arena, code, emit_stmt(g, f->body.data[i], 1));
-    if (g->hadError) return (astr){0};
-    code = astr_concat(g->arena, code, astr("\n"));
+    astr one = emit_stmt(g, f->body.data[i], 1);
+    if (g->hadError)
+      return (astr){0};
+    push_part(g, &parts, one);
+    push_part(g, &parts, astr("\n"));
   }
   g->emitFunc = 0;
+  code = join_parts(g, &parts);
   return astr_concat(g->arena, code, astr("  return NIL_VAL;\n}\n"));
 }
 
@@ -1403,8 +1586,10 @@ CgenResult cgen_compile(Arena* arena, StmtList prog) {
   CGen g = {0};
   g.arena = arena;
 
-  for (isize i = 0; i < prog.len; i++) check_stmt(&g, prog.data[i], false);
-  if (g.hadError) return fail;
+  for (isize i = 0; i < prog.len; i++)
+    check_stmt(&g, prog.data[i], false);
+  if (g.hadError)
+    return fail;
 
   CgenScope* top = new_scope(&g, NULL, 0);
   top->isScriptDirect = true;
@@ -1429,8 +1614,7 @@ CgenResult cgen_compile(Arena* arena, StmtList prog) {
         CgenBinding b = {name->start, name->length, 0};
         bool already = false;
         for (isize j = 0; j < top->bindings.len; j++) {
-          if (top->bindings.data[j].start == name->start &&
-              top->bindings.data[j].length == name->length) {
+          if (top->bindings.data[j].start == name->start && top->bindings.data[j].length == name->length) {
             already = true;
             break;
           }
@@ -1441,15 +1625,18 @@ CgenResult cgen_compile(Arena* arena, StmtList prog) {
           Push(arena, &top->bindings, b);
         }
       }
-      otherwise {}
+      otherwise {
+      }
     }
   }
 
   RStmtList resolved = resolve_list(&g, top, prog);
-  if (g.hadError) return fail;
+  if (g.hadError)
+    return fail;
 
   RStmtList flat = lower_body(&g, &resolved);
-  if (g.hadError) return fail;
+  if (g.hadError)
+    return fail;
 
   g.envs = build_envs(&g);
 
@@ -1460,7 +1647,8 @@ CgenResult cgen_compile(Arena* arena, StmtList prog) {
   astr code = astr("#include \"loxrt.h\"\n\n");
   // Script globals (script-direct uids with declarations).
   for (int uid = 1; uid <= g.uid; uid++) {
-    if (!uid_is_global(&g, uid)) continue;
+    if (!uid_is_global(&g, uid))
+      continue;
     if (uid == g.clockUid) {
       bool used = false;
       for (isize i = 0; i < g.useUid.len; i++) {
@@ -1469,7 +1657,8 @@ CgenResult cgen_compile(Arena* arena, StmtList prog) {
           break;
         }
       }
-      if (!used) continue;
+      if (!used)
+        continue;
     }
     Token tok = g.uidToken.data[uid - 1];
     code = astr_concat(arena, code, astr("static Value "));
@@ -1480,14 +1669,17 @@ CgenResult cgen_compile(Arena* arena, StmtList prog) {
   }
   code = astr_concat(arena, code, astr("\n"));
   for (isize i = 0; i < funs.len; i++) {
-    code = astr_concat(arena, code,
-                       astr_format(arena, "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine);\n",
-                                   funs.data[i].uid));
+    code = astr_concat(
+        arena, code,
+        astr_format(arena,
+                    "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine);\n",
+                    funs.data[i].uid));
   }
   code = astr_concat(arena, code, astr("\n"));
   for (isize i = 0; i < funs.len; i++) {
     code = astr_concat(arena, code, emit_function(&g, &funs.data[i]));
-    if (g.hadError) return fail;
+    if (g.hadError)
+      return fail;
     code = astr_concat(arena, code, astr("\n"));
   }
 
@@ -1505,12 +1697,17 @@ CgenResult cgen_compile(Arena* arena, StmtList prog) {
       break;
     }
   }
+  AstrParts parts = {0};
+  push_part(&g, &parts, code);
   for (isize i = 0; i < flat.len; i++) {
-    code = astr_concat(arena, code, emit_stmt(&g, flat.data[i], 1));
-    if (g.hadError) return fail;
-    code = astr_concat(arena, code, astr("\n"));
+    astr one = emit_stmt(&g, flat.data[i], 1);
+    if (g.hadError)
+      return fail;
+    push_part(&g, &parts, one);
+    push_part(&g, &parts, astr("\n"));
   }
-  code = astr_concat(arena, code, astr("  lox_free();\n  return 0;\n}\n"));
+  push_part(&g, &parts, astr("  lox_free();\n  return 0;\n}\n"));
+  code = join_parts(&g, &parts);
 
   CgenResult ok = {code, true};
   return ok;

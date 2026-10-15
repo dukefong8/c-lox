@@ -61,35 +61,49 @@ static void runFile(const char* path) {
 static void emitCFile(const char* path) {
   char* source = readFile(path);
 
-  byte* buf = malloc(MB(16));
-  if (buf == NULL) {
-    fprintf(stderr, "Out of memory.\n");
-    exit(1);
-  }
-  Arena arena = arena_init(buf, MB(16));
+  // Parsing and codegen are pure functions of (arena, source), so an
+  // exhausted arena is retried with a doubled buffer instead of failing:
+  // the 16 MB start is a guess, not a limit. Past the cap, treat it as
+  // genuine exhaustion (exit 1, like the oracle on malloc failure).
+  size_t size = MB(16);
+  for (;;) {
+    byte* buf = malloc(size);
+    if (buf == NULL) {
+      fprintf(stderr, "Out of memory.\n");
+      exit(1);
+    }
+    Arena arena = arena_init(buf, size);
 
-  jmp_buf oom;
-  if (ArenaOOM(&arena, oom)) {
-    fprintf(stderr, "Out of memory.\n");
-    exit(1);
-  }
+    jmp_buf oom;
+    if (ArenaOOM(&arena, oom)) {
+      free(buf);
+      size *= 2;
+      if (size > MB(256)) {
+        fprintf(stderr, "Out of memory.\n");
+        free(source);
+        exit(1);
+      }
+      continue;
+    }
 
-  int exitCode = 0;
-  ParseResult pres = parseProgram(&arena, source);
-  if (pres.hadError) {
-    exitCode = 65;
-  } else {
-    CgenResult cres = cgen_compile(&arena, pres.statements);
-    if (!cres.ok) {
+    int exitCode = 0;
+    ParseResult pres = parseProgram(&arena, source);
+    if (pres.hadError) {
       exitCode = 65;
     } else {
-      fwrite(cres.code.data, 1, (size_t)cres.code.len, stdout);
+      CgenResult cres = cgen_compile(&arena, pres.statements);
+      if (!cres.ok) {
+        exitCode = 65;
+      } else {
+        fwrite(cres.code.data, 1, (size_t)cres.code.len, stdout);
+      }
     }
-  }
 
-  free(source);
-  free(buf);
-  if (exitCode != 0) exit(exitCode);
+    free(source);
+    free(buf);
+    if (exitCode != 0) exit(exitCode);
+    return;
+  }
 }
 
 int main(int argc, char* argv[]) {
