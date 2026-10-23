@@ -19,8 +19,13 @@ typedef struct {
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
 
+// Lists are movable `Slice` descriptors. Allocate one in the arena with
+// `New(arena, XxxList)` and pass/store the resulting `XxxList*`; the parser
+// writes into the caller's descriptor.
 typedef Slice(Expr*) ExprList;
+
 typedef Slice(Stmt*) StmtList;
+
 typedef Slice(Token) TokenList;
 
 #ifndef _CLANGD
@@ -31,7 +36,7 @@ datatype(Expr,
   (Literal, Value),
   (Assign, Token, Expr*),
   (Binary, Expr*, Token, Expr*),
-  (Call, Expr*, Token, ExprList),
+  (Call, Expr*, Token, ExprList*),
   (Get, Expr*, Token),
   (Grouping, Expr*),
   (Logical, Expr*, Token, Expr*),
@@ -43,10 +48,10 @@ datatype(Expr,
 );
 
 datatype(Stmt,
-  (Block, StmtList),
-  (Class, Token, Expr*, StmtList),
+  (Block, StmtList*),
+  (Class, Token, Expr*, StmtList*),
   (Expression, Expr*),
-  (Function, Token, TokenList, StmtList),
+  (Function, Token, TokenList*, StmtList*),
   (If, Expr*, Stmt*, Stmt*),
   (Print, Expr*),
   (Return, Token, Expr*),
@@ -58,14 +63,15 @@ datatype(Stmt,
 #endif  // _CLANGD
 
 typedef struct {
-  StmtList statements;
   bool hadError;
 } ParseResult;
 
-// Parse a full program (declaration* EOF) into arena-allocated AST.
-// Arena must outlive the returned AST. String literal Values reference
-// VM-heap ObjStrings (see copyString), not the arena.
-ParseResult parseProgram(Arena* arena, const char* source);
+// Parse a full program (declaration* EOF) into arena-allocated AST. The
+// caller supplies an arena-allocated descriptor
+// (`StmtList* s = New(arena, StmtList);`); the parser writes into it.
+// Arena must outlive the AST. String literal Values reference VM-heap
+// ObjStrings (see copyString), not the arena.
+ParseResult parseProgram(Arena* arena, const char* source, StmtList* statements);
 
 // Debug helper: parse + pretty-print a program. Manages its own arena.
 void parse(const char* source);
@@ -73,7 +79,7 @@ void parse(const char* source);
 #ifndef _CLANGD
 void printExpr(Expr* expr);
 void printStmt(Stmt* stmt);
-void printProgram(StmtList statements);
+void printProgram(StmtList* statements);
 #endif
 
 #endif  // clox_parser_h

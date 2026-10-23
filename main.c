@@ -87,11 +87,12 @@ static void emitCFile(const char* path) {
     }
 
     int exitCode = 0;
-    ParseResult pres = parseProgram(&arena, source);
+    StmtList* statements = New(&arena, StmtList);
+    ParseResult pres = parseProgram(&arena, source, statements);
     if (pres.hadError) {
       exitCode = 65;
     } else {
-      CgenResult cres = cgen_compile(&arena, pres.statements);
+      CgenResult cres = cgen_compile(&arena, statements);
       if (!cres.ok) {
         exitCode = 65;
       } else {

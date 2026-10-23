@@ -177,11 +177,12 @@ void printExpr(Expr* expr) {
     }
     of(Call, callee, paren, args) {
       (void)paren;
+      ExprList* callArgs = *args;
       printf("(call ");
       printExpr(*callee);
-      for (isize i = 0; i < args->len; i++) {
+      for (isize i = 0; i < callArgs->len; i++) {
         printf(" ");
-        printExpr(args->data[i]);
+        printExpr(callArgs->data[i]);
       }
       printf(")");
     }
@@ -233,22 +234,24 @@ void printStmt(Stmt* stmt) {
   }
   match(*stmt) {
     of(Block, statements) {
+      StmtList* body = *statements;
       printf("(block");
-      for (isize i = 0; i < statements->len; i++) {
+      for (isize i = 0; i < body->len; i++) {
         printf(" ");
-        printStmt(statements->data[i]);
+        printStmt(body->data[i]);
       }
       printf(")");
     }
     of(Class, name, superclass, methods) {
+      StmtList* methodList = *methods;
       printf("(class %.*s", name->length, name->start);
       if (*superclass != NULL) {
         printf(" < ");
         printExpr(*superclass);
       }
-      for (isize i = 0; i < methods->len; i++) {
+      for (isize i = 0; i < methodList->len; i++) {
         printf(" ");
-        printStmt(methods->data[i]);
+        printStmt(methodList->data[i]);
       }
       printf(")");
     }
@@ -258,15 +261,17 @@ void printStmt(Stmt* stmt) {
       printf(")");
     }
     of(Function, name, params, body) {
+      TokenList* paramList = *params;
+      StmtList* fnBody = *body;
       printf("(fun %.*s(", name->length, name->start);
-      for (isize i = 0; i < params->len; i++) {
+      for (isize i = 0; i < paramList->len; i++) {
         if (i > 0) printf(" ");
-        printf("%.*s", params->data[i].length, params->data[i].start);
+        printf("%.*s", paramList->data[i].length, paramList->data[i].start);
       }
       printf(")");
-      for (isize i = 0; i < body->len; i++) {
+      for (isize i = 0; i < fnBody->len; i++) {
         printf(" ");
-        printStmt(body->data[i]);
+        printStmt(fnBody->data[i]);
       }
       printf(")");
     }
@@ -313,9 +318,9 @@ void printStmt(Stmt* stmt) {
   }
 }
 
-void printProgram(StmtList statements) {
-  for (isize i = 0; i < statements.len; i++) {
-    printStmt(statements.data[i]);
+void printProgram(StmtList* statements) {
+  for (isize i = 0; i < statements->len; i++) {
+    printStmt(statements->data[i]);
     printf("\n");
   }
 }
@@ -332,7 +337,7 @@ static Stmt* returnStatement(void);
 static Stmt* ifStatement(void);
 static Stmt* whileStatement(void);
 static Stmt* forStatement(void);
-static StmtList block(void);
+static void block(StmtList* out);
 static Expr* expression(void);
 static Expr* assignment(void);
 static Expr* logic_or(void);
@@ -346,7 +351,7 @@ static Expr* finishCall(Expr* callee);
 static Expr* call(void);
 static Expr* primary(void);
 
-ParseResult parseProgram(Arena* arena, const char* source) {
+ParseResult parseProgram(Arena* arena, const char* source, StmtList* statements) {
   ast_arena = arena;
   parser.hadError = false;
   parser.panicMode = false;
@@ -355,16 +360,15 @@ ParseResult parseProgram(Arena* arena, const char* source) {
   initScanner(source);
   advance();
 
-  StmtList statements = {0};
   while (!isAtEnd()) {
     Stmt* decl = declaration();
     if (decl != NULL) {
-      Push(arena, &statements, decl);
+      *Push(arena, statements) = decl;
     }
   }
 
   ast_arena = NULL;
-  return (ParseResult){statements, parser.hadError};
+  return (ParseResult){parser.hadError};
 }
 
 void parse(const char* source) {
@@ -383,9 +387,10 @@ void parse(const char* source) {
     return;
   }
 
-  ParseResult result = parseProgram(&arena, source);
+  StmtList* statements = New(&arena, StmtList);
+  ParseResult result = parseProgram(&arena, source, statements);
   if (!result.hadError) {
-    printProgram(result.statements);
+    printProgram(statements);
   }
 
   free(buf);
@@ -431,9 +436,9 @@ static Stmt* classDeclaration(void) {
 
   consume(TOKEN_LEFT_BRACE, "Expect '{' before class body.");
 
-  StmtList methods = {0};
+  StmtList* methods = New(ast_arena, StmtList, 1);
   while (!check(TOKEN_RIGHT_BRACE) && !isAtEnd()) {
-    Push(ast_arena, &methods, function("method"));
+    *Push(ast_arena, methods) = function("method");
   }
 
   consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
@@ -452,21 +457,22 @@ static Stmt* function(const char* kind) {
   snprintf(msg, sizeof(msg), "Expect '(' after %s name.", kind);
   consume(TOKEN_LEFT_PAREN, msg);
 
-  TokenList params = {0};
+  TokenList* params = New(ast_arena, TokenList, 1);
   if (!check(TOKEN_RIGHT_PAREN)) {
     do {
-      if (params.len >= 255) {
+      if (params->len >= 255) {
         // Non-fatal like jlox: report, keep parsing.
         error(peek(), "Can't have more than 255 parameters.");
       }
-      Push(ast_arena, &params, consume(TOKEN_IDENTIFIER, "Expect parameter name."));
+      *Push(ast_arena, params) = consume(TOKEN_IDENTIFIER, "Expect parameter name.");
     } while (match1(TOKEN_COMMA));
   }
   consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
 
   snprintf(msg, sizeof(msg), "Expect '{' before %s body.", kind);
   consume(TOKEN_LEFT_BRACE, msg);
-  StmtList body = block();
+  StmtList* body = New(ast_arena, StmtList, 1);
+  block(body);
 
   return newStmt(Function(name, params, body));
 }
@@ -493,7 +499,8 @@ static Stmt* statement(void) {
   if (match1(TOKEN_RETURN)) return returnStatement();
   if (match1(TOKEN_WHILE)) return whileStatement();
   if (match1(TOKEN_LEFT_BRACE)) {
-    StmtList stmts = block();
+    StmtList* stmts = New(ast_arena, StmtList, 1);
+    block(stmts);
     return newStmt(Block(stmts));
   }
 
@@ -581,9 +588,9 @@ static Stmt* forStatement(void) {
   Stmt* body = statement();
 
   if (increment != NULL) {
-    StmtList seq = {0};
-    Push(ast_arena, &seq, body);
-    Push(ast_arena, &seq, newStmt(Expression(increment)));
+    StmtList* seq = New(ast_arena, StmtList, 1);
+    *Push(ast_arena, seq) = body;
+    *Push(ast_arena, seq) = newStmt(Expression(increment));
     body = newStmt(Block(seq));
   }
 
@@ -593,9 +600,9 @@ static Stmt* forStatement(void) {
   body = newStmt(While(condition, body));
 
   if (initializer != NULL) {
-    StmtList seq = {0};
-    Push(ast_arena, &seq, initializer);
-    Push(ast_arena, &seq, body);
+    StmtList* seq = New(ast_arena, StmtList, 1);
+    *Push(ast_arena, seq) = initializer;
+    *Push(ast_arena, seq) = body;
     body = newStmt(Block(seq));
   }
 
@@ -603,18 +610,15 @@ static Stmt* forStatement(void) {
 }
 
 // block → "{" declaration* "}" ;
-static StmtList block(void) {
-  StmtList statements = {0};
-
+static void block(StmtList* statements) {
   while (!check(TOKEN_RIGHT_BRACE) && !isAtEnd()) {
     Stmt* decl = declaration();
     if (decl != NULL) {
-      Push(ast_arena, &statements, decl);
+      *Push(ast_arena, statements) = decl;
     }
   }
 
   consume(TOKEN_RIGHT_BRACE, "Expect '}' after block.");
-  return statements;
 }
 
 // expression → assignment ;
@@ -741,14 +745,14 @@ static Expr* unary(void) {
 
 // arguments → expression ( "," expression )* ;
 static Expr* finishCall(Expr* callee) {
-  ExprList arguments = {0};
+  ExprList* arguments = New(ast_arena, ExprList, 1);
   if (!check(TOKEN_RIGHT_PAREN)) {
     do {
-      if (arguments.len >= 255) {
+      if (arguments->len >= 255) {
         // Non-fatal like jlox: report, keep parsing.
         error(peek(), "Can't have more than 255 arguments.");
       }
-      Push(ast_arena, &arguments, expression());
+      *Push(ast_arena, arguments) = expression();
     } while (match1(TOKEN_COMMA));
   }
 

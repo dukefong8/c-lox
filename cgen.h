@@ -32,6 +32,6 @@ typedef struct {
 
 // Compile a parsed program to C source text. Prints "[line N] Error: ..."
 // and returns ok=false on unsupported constructs or undefined variables.
-CgenResult cgen_compile(Arena* arena, StmtList prog);
+CgenResult cgen_compile(Arena* arena, StmtList* prog);
 
 #endif

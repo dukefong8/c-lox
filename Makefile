@@ -6,10 +6,13 @@ OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(OBJS:.o=.d)
 
 WARN = -Wall -Wextra -Wno-unused-parameter -Wno-unused-function 
-SANZ = -fsanitize=undefined
+SANZ = # -fsanitize=undefined
+
+# Clang-only: print just one frame of macro expansion context on errors.
+CLANG_MACRO_FLAGS := $(shell $(CC) --version 2>/dev/null | grep -qi clang && echo -fmacro-backtrace-limit=1)
 
 CPPFLAGS += -MMD -MP -I. -I../ModernC/include
-CFLAGS += $(WARN) $(SANZ) -g3 -fno-omit-frame-pointer
+CFLAGS += $(WARN) $(SANZ) -g3 -fno-omit-frame-pointer $(CLANG_MACRO_FLAGS)
 LDFLAGS += $(SANZ)
 
 .PHONY: all

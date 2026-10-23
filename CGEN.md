@@ -70,6 +70,14 @@ Standing VM-parity gate `python3 /tmp/opencode/parity_runtests.py`
 (`function/local_mutual_recursion`: identical message and exit 70, VM prints
 the deeper call-stack traceback), zero behavior diffs either direction.
 
+## Arena list pattern
+
+Every `Slice` is a movable descriptor. Parser and IR lists are allocated with
+`New(arena, XxxList)` and stored/passed as `XxxList*`; there are no
+descriptor-value locals or `ListElem` aliases. Lists are read by index
+(`list->data[i]`), while stable references to AST/IR nodes are arena-allocated
+`Expr*`/`Stmt*`/`RExpr*` objects, never pointers into a list's backing block.
+
 ## Pointers
 
 - Implementation: `cgen.h`, `cgen.c`, `loxrt.h`, `loxrt.c`, `main.c --emit-c`.
