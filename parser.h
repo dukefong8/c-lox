@@ -4,7 +4,7 @@
 #include <datatype99.h>
 #include <stdbool.h>
 
-#include <arena.h>
+#include "mmap_arena.h"
 
 #include "scanner.h"
 #include "value.h"
@@ -73,8 +73,9 @@ typedef struct {
 // ObjStrings (see copyString), not the arena.
 ParseResult parseProgram(Arena* arena, const char* source, StmtList* statements);
 
-// Debug helper: parse + pretty-print a program. Manages its own arena.
-void parse(const char* source);
+// Debug helper: parse + pretty-print a program in the caller's arena.
+// Neither resets nor releases it.
+void parse(Arena* arena, const char* source);
 
 #ifndef _CLANGD
 void printExpr(Expr* expr);

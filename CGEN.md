@@ -23,9 +23,9 @@ fast with `unsupported '…'` plus line.
   on a bare temp, `or` on `!temp`; branches normalize to `Block`s. Call
   args lower left-to-right (callee first); function bodies and `return`
   values recurse.
-- `emit-c`: `L_flat` → C text (built with arena `astr` inside the compiler; the
-  generated C is plain code). Every Lox function becomes a file-scope C
-  function plus an `ObjCFun` value (new `OBJ_CFUN` runtime type for identity,
+- `emit-c`: `L_flat` → C text streamed to the output file (no retained
+  output buffer). Every Lox function becomes a file-scope C function plus
+  an `ObjCFun` value (new `OBJ_CFUN` runtime type for identity,
   `<fn name>` printing and pointer equality). Captured variables live in
   `LoxCell` heap cells shared by pointer (one cell per declaration
   execution, so loop-body closures stay per-iteration); upvalue chains form
@@ -50,6 +50,16 @@ fast with `unsupported '…'` plus line.
   in `lox_init`): every live `Value` sits in C locals, C globals or malloc'd
   `LoxCell`s, none of which the collector traces. Allocations are still
   freed by `lox_free` at exit; collection is unobservable except timing.
+- The compiler side (source text, parse AST and cgen IR) uses one mmap-backed
+  bump arena (`mmap_arena.h`, `OOM_COMMIT`) per run: a fixed virtual range
+  (`clox_arena_reserve()`, capped at 64 GiB and clamped to half of a finite
+  `RLIMIT_AS`) is reserved once and pages are committed on demand, so no arena
+  is sized from an input's length. The VM runtime (objects,
+  strings, chunks, tables) and `LoxCell`s keep using `malloc`/`realloc`/`free`,
+  so the interpreter retains the book's normal mark-sweep reclamation. The
+  compiler treats `Arena` as an abstract type: it allocates with `New`,
+  scopes scratch work in a stack copy (`Arena scratch[] = {*arena}`, per
+  arena.h's manual-block pattern), and never reads its fields.
 - Transitive captures need no runtime chain walk: each function's env is
   computed from whole-subtree uses, so ancestor frames re-export cells their
   nested closures close over.
@@ -77,6 +87,33 @@ Every `Slice` is a movable descriptor. Parser and IR lists are allocated with
 descriptor-value locals or `ListElem` aliases. Lists are read by index
 (`list->data[i]`), while stable references to AST/IR nodes are arena-allocated
 `Expr*`/`Stmt*`/`RExpr*` objects, never pointers into a list's backing block.
+
+Lists whose final size is known are `Reserve`d up front (`resolve_list`,
+`lower_body`, `append_list`, block emitters, uid/use tables via a declaration
+pre-count): node allocations between pushes would otherwise force every
+geometric regrowth to relocate and orphan its backing (~2x garbage pinned
+until the arena is released).
+
+## RSS discipline (peak < 512 MB on million-statement inputs)
+
+- `emit-c` streams: the driver (`cgen_write_c`) writes each top-level
+  statement and each function body straight to the output file inside a
+  per-item scratch scope (a stack `Arena` copy, per arena.h's manual-block
+  pattern), so generated text never
+  accumulates in the arena. Only nested fragments (blocks, branches) still
+  join in memory, bounded by nesting depth rather than program size. All
+  checking passes run before the first byte is written, so a failed
+  check/resolve/lower still writes nothing.
+- The source text, AST, and cgen IR share one arena, reset between inputs.
+  Peak RSS is the high-water of the largest single input's full compile, not
+  the sum across files.
+- `--emit-c` accepts several paths in one run. Each program is written next
+  to its source as `<name>.c`; the same arena is reset before each input and
+  released after the last one.
+- A scratch scope bumps only its local arena copy, leaving the outer cursor
+  where it was; the next scope reuses the same (already-committed) region. `arena_release`
+  `munmap`s the whole reservation at the end, so RSS tracks the high-water
+  live set instead of cumulative allocation.
 
 ## Pointers
 

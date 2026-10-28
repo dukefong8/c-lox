@@ -4,8 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <arena.h>
-
 #include "common.h"
 #include "debug.h"
 #include "object.h"
@@ -119,6 +117,17 @@ static Token consume(TokenType type, const char* message) {
   return dummy;
 }
 
+// Non-fatal: report the error and keep parsing, mirroring the book compiler's
+// consume(). Used where recovery should still reach the following block so
+// cascaded diagnostics (e.g. "Expect '}' after block.") match the VM.
+static void consumeSoft(TokenType type, const char* message) {
+  if (check(type)) {
+    advance();
+  } else {
+    errorAtCurrent(message);
+  }
+}
+
 static void synchronize(void) {
   advance();
 
@@ -144,6 +153,34 @@ static void synchronize(void) {
   }
 
   parser.panicMode = false;
+}
+
+// Non-fatal recovery, mirroring the book compiler's synchronize(): clear
+// panic mode and skip to a statement boundary, but do not consume the current
+// token when we are already at one. Used after a declaration parsed without
+// throwing while panic mode was set.
+static void resync(void) {
+  parser.panicMode = false;
+
+  while (!isAtEnd()) {
+    if (previous().type == TOKEN_SEMICOLON) return;
+
+    switch (peek().type) {
+      case TOKEN_CLASS:
+      case TOKEN_FUN:
+      case TOKEN_VAR:
+      case TOKEN_FOR:
+      case TOKEN_IF:
+      case TOKEN_WHILE:
+      case TOKEN_PRINT:
+      case TOKEN_RETURN:
+        return;
+      default:
+        break;
+    }
+
+    advance();
+  }
 }
 
 #ifndef _CLANGD
@@ -371,29 +408,15 @@ ParseResult parseProgram(Arena* arena, const char* source, StmtList* statements)
   return (ParseResult){parser.hadError};
 }
 
-void parse(const char* source) {
-  byte* buf = malloc(MB(8));
-  if (buf == NULL) {
-    fprintf(stderr, "Out of memory in parser.\n");
-    return;
-  }
-  Arena arena = arena_init(buf, MB(8));
-
-  jmp_buf oom;
-  if (ArenaOOM(&arena, oom)) {
-    fprintf(stderr, "Out of memory in parser arena.\n");
-    free(buf);
-    ast_arena = NULL;
-    return;
-  }
-
-  StmtList* statements = New(&arena, StmtList);
-  ParseResult result = parseProgram(&arena, source, statements);
+// Debug helper: parse + pretty-print a program. The caller supplies the
+// arena and owns its lifetime (and OOM handler); parse never resets or
+// releases it, so the source text, AST and cgen IR can share one arena.
+void parse(Arena* arena, const char* source) {
+  StmtList* statements = New(arena, StmtList);
+  ParseResult result = parseProgram(arena, source, statements);
   if (!result.hadError) {
     printProgram(statements);
   }
-
-  free(buf);
 }
 
 // declaration → classDecl | funDecl | varDecl | statement ;
@@ -415,6 +438,11 @@ static Stmt* declaration(void) {
     } else {
       result = statement();
     }
+    // A non-fatal error may have left parsing mid-statement (consumeSoft in
+    // function()): resync here, like the book compiler's declaration(), so
+    // the enclosing block() can still report its own error at the next
+    // boundary instead of inheriting panic mode.
+    if (parser.panicMode) resync();
   } else {
     // ParseError: unwind from a nested consume()/primary().
     synchronize();
@@ -467,10 +495,10 @@ static Stmt* function(const char* kind) {
       *Push(ast_arena, params) = consume(TOKEN_IDENTIFIER, "Expect parameter name.");
     } while (match1(TOKEN_COMMA));
   }
-  consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+  consumeSoft(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
 
   snprintf(msg, sizeof(msg), "Expect '{' before %s body.", kind);
-  consume(TOKEN_LEFT_BRACE, msg);
+  consumeSoft(TOKEN_LEFT_BRACE, msg);
   StmtList* body = New(ast_arena, StmtList, 1);
   block(body);
 

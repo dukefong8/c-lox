@@ -20,6 +20,7 @@ typedef Slice(CgenEnv) CgenEnvList;
 
 typedef struct {
   Arena* arena;
+  FILE* out;
   int uid;
   bool hadError;
   int funcCount;
@@ -42,6 +43,22 @@ typedef struct {
 
 static void cgen_error(CGen* g, int line, const char* message) {
   fprintf(stderr, "[line %d] Error: %s\n", line, message);
+  g->hadError = true;
+}
+
+// Token-aware variant, matching the VM's errorAt(): include the offending
+// lexeme (or "at end") so diagnostics line up with the book's expected text.
+static void cgen_error_at(CGen* g, Token* token, const char* message) {
+  fprintf(stderr, "[line %d] Error", token->line);
+
+  if (token->type == TOKEN_EOF) {
+    fprintf(stderr, " at end");
+  } else if (token->type == TOKEN_ERROR) {
+  } else {
+    fprintf(stderr, " at '%.*s'", token->length, token->start);
+  }
+
+  fprintf(stderr, ": %s\n", message);
   g->hadError = true;
 }
 
@@ -216,7 +233,7 @@ static void check_stmt(CGen* g, Stmt* s, bool inFun) {
     }
     of(Return, keyword, value) {
       if (!inFun) {
-        cgen_error(g, keyword->line, "Can't return from top-level code.");
+        cgen_error_at(g, keyword, "Can't return from top-level code.");
         return;
       }
       if (*value != NULL)
@@ -260,6 +277,127 @@ static CgenScope* new_scope(CGen* g, CgenScope* parent, int funcId) {
   return scope;
 }
 
+// Pre-pass: count declarations that will each consume exactly one uid
+// (Var decls, Function decls, params) plus variable references (each a use
+// record). Lets the driver Reserve the uid/use tables exactly, so their
+// backing never relocates: without this, interleaved node allocations force
+// every geometric regrowth to orphan its backing (~2x garbage on big files).
+typedef struct {
+  isize decls;
+  isize refs;
+} UidCounts;
+
+static void count_expr_uids(UidCounts* c, Expr* e) {
+  match(*e) {
+    of(Literal, value) {
+      (void)value;
+    }
+    of(Assign, name, val) {
+      (void)name;
+      c->refs++;
+      count_expr_uids(c, *val);
+    }
+    of(Binary, left, op, right) {
+      (void)op;
+      count_expr_uids(c, *left);
+      count_expr_uids(c, *right);
+    }
+    of(Call, callee, paren, args) {
+      (void)paren;
+      count_expr_uids(c, *callee);
+      ExprList* callArgs = *args;
+      for (isize i = 0; i < callArgs->len; i++)
+        count_expr_uids(c, callArgs->data[i]);
+    }
+    of(Get, object, name) {
+      (void)name;
+      count_expr_uids(c, *object);
+    }
+    of(Grouping, inner) {
+      count_expr_uids(c, *inner);
+    }
+    of(Logical, left, op, right) {
+      (void)op;
+      count_expr_uids(c, *left);
+      count_expr_uids(c, *right);
+    }
+    of(Set, object, name, value) {
+      (void)name;
+      count_expr_uids(c, *object);
+      count_expr_uids(c, *value);
+    }
+    of(Super, keyword, method) {
+      (void)keyword;
+      (void)method;
+    }
+    of(This, keyword) {
+      (void)keyword;
+    }
+    of(Unary, op, right) {
+      (void)op;
+      count_expr_uids(c, *right);
+    }
+    of(Variable, name) {
+      (void)name;
+      c->refs++;
+    }
+  }
+}
+
+static void count_stmt_uids(UidCounts* c, Stmt* s) {
+  match(*s) {
+    of(Block, statements) {
+      StmtList* body = *statements;
+      for (isize i = 0; i < body->len; i++)
+        count_stmt_uids(c, body->data[i]);
+    }
+    of(Class, name, superclass, methods) {
+      (void)name;
+      if (*superclass != NULL)
+        count_expr_uids(c, *superclass);
+      StmtList* methodList = *methods;
+      for (isize i = 0; i < methodList->len; i++)
+        count_stmt_uids(c, methodList->data[i]);
+    }
+    of(Expression, expression) {
+      count_expr_uids(c, *expression);
+    }
+    of(Function, name, params, body) {
+      (void)name;
+      c->decls++;  // the function name itself
+      TokenList* paramList = *params;
+      c->decls += paramList->len;
+      StmtList* fnBody = *body;
+      for (isize i = 0; i < fnBody->len; i++)
+        count_stmt_uids(c, fnBody->data[i]);
+    }
+    of(If, condition, thenBranch, elseBranch) {
+      count_expr_uids(c, *condition);
+      count_stmt_uids(c, *thenBranch);
+      if (*elseBranch != NULL)
+        count_stmt_uids(c, *elseBranch);
+    }
+    of(Print, expression) {
+      count_expr_uids(c, *expression);
+    }
+    of(Return, keyword, value) {
+      (void)keyword;
+      if (*value != NULL)
+        count_expr_uids(c, *value);
+    }
+    of(Var, name, initializer) {
+      (void)name;
+      c->decls++;
+      if (*initializer != NULL)
+        count_expr_uids(c, *initializer);
+    }
+    of(While, condition, body) {
+      count_expr_uids(c, *condition);
+      count_stmt_uids(c, *body);
+    }
+  }
+}
+
 // Bind a name in this scope, allocating a uid. A duplicate in the same
 // LOCAL scope is a compile error (mirror declareVariable); the script scope
 // allows redefinition (global semantics). Returns the uid, or -1 on error.
@@ -268,7 +406,7 @@ static int scope_bind(CGen* g, CgenScope* scope, Token name) {
     for (isize i = 0; i < scope->bindings->len; i++) {
       CgenBinding* b = &scope->bindings->data[i];
       if (b->length == name.length && memcmp(b->start, name.start, (size_t)name.length) == 0) {
-        cgen_error(g, name.line, "Already a variable with this name in this scope.");
+        cgen_error_at(g, &name, "Already a variable with this name in this scope.");
         return -1;
       }
     }
@@ -575,7 +713,7 @@ static RStmt* resolve_stmt(CGen* g, CgenScope* scope, Stmt* s) {
         if (g->hadError)
           return NULL;
         if (init_uses_uid(g, init, uid)) {
-          cgen_error(g, name->line, "Can't read local variable in its own initializer.");
+          cgen_error_at(g, name, "Can't read local variable in its own initializer.");
           return NULL;
         }
       }
@@ -596,6 +734,11 @@ static RStmt* resolve_stmt(CGen* g, CgenScope* scope, Stmt* s) {
 }
 
 static void resolve_list(CGen* g, CgenScope* scope, StmtList* stmts, RStmtList* out) {
+  // Slice pattern: exact Reserve up front keeps the backing at the arena tip
+  // (in-place growth, nothing orphaned). Without it, node allocations between
+  // pushes force every geometric regrowth to relocate and abandon the old
+  // backing, pinning ~2x garbage until the arena is released.
+  Reserve(g->arena, out, out->len + stmts->len);
   for (isize i = 0; i < stmts->len; i++) {
     RStmt* s = resolve_stmt(g, scope, stmts->data[i]);
     if (g->hadError)
@@ -631,6 +774,7 @@ static Token bang_token(int line) {
 
 // Append every statement in src to out.
 static void append_list(CGen* g, RStmtList* out, RStmtList* src) {
+  Reserve(g->arena, out, out->len + src->len);
   for (isize i = 0; i < src->len; i++)
     *Push(g->arena, out) = src->data[i];
 }
@@ -801,6 +945,9 @@ static void lower_stmt(CGen* g, RStmt* s, RStmtList* out);
 static void lower_body(CGen* g, RStmtList* stmts, RStmtList* out);
 
 static void lower_body(CGen* g, RStmtList* stmts, RStmtList* out) {
+  // Floor reserve: lowering emits >= 1 flat stmt per resolved stmt (spilled
+  // temps only add more). Keeps the common no-spill case relocation-free.
+  Reserve(g->arena, out, out->len + stmts->len);
   for (isize i = 0; i < stmts->len; i++) {
     lower_stmt(g, stmts->data[i], out);
     if (g->hadError)
@@ -1078,10 +1225,11 @@ static astr emit_cell_ptr(CGen* g, int uid) {
 }
 
 static astr emit_indent(CGen* g, int depth) {
-  astr out = {0};
-  for (int i = 0; i < depth; i++)
-    out = astr_concat(g->arena, out, astr("  "));
-  return out;
+  if (depth <= 0) return (astr){0};
+  isize n = (isize)depth * 2;
+  char* buf = New(g->arena, char, n, NO_INIT);
+  memset(buf, ' ', (size_t)n);
+  return (astr){buf, n};
 }
 
 typedef Slice(astr) AstrParts;
@@ -1106,22 +1254,91 @@ static void push_part(CGen* g, AstrParts* parts, astr part) {
   *Push(g->arena, parts) = part;
 }
 
+// Streaming writes: the top-level driver and function bodies go straight to
+// the output file statement-by-statement, so generated text never piles up in
+// the arena. Only nested fragments (blocks, branches) still join in memory,
+// bounded by nesting depth rather than program size.
+static void write_astr(CGen* g, astr s) {
+  if (s.len > 0)
+    fwrite(s.data, 1, (size_t)s.len, g->out);
+}
+
+static void write_str(CGen* g, const char* s) {
+  fputs(s, g->out);
+}
+
+static astr emit_stmt(CGen* g, RStmt* s, int depth);
+
+// Emit one statement into a scratch scope, keeping only the cloned result in
+// the outer arena. Multi-statement loops must use this: a bare emit_stmt
+// leaves every transient (names, indents, sub-expression strings) committed
+// in the arena, so RSS grows with the sum of all temporaries instead of the
+// output size.
+static astr emit_stmt_kept(CGen* g, RStmt* s, int depth) {
+  Arena scratch[] = {*g->arena};
+  CGen sg = *g;
+  sg.arena = scratch;
+  astr tmp = emit_stmt(&sg, s, depth);
+  if (sg.hadError) {
+    g->hadError = true;
+    return (astr){0};
+  }
+  return astr_clone(g->arena, tmp);  // copy out before the scratch is dropped
+}
+
+// Stream one statement, discarding its transient text when it returns. The
+// caller supplies any framing (indent/newline) itself.
+static bool emit_stmt_stream(CGen* g, RStmt* s, int depth) {
+  Arena scratch[] = {*g->arena};
+  CGen sg = *g;
+  sg.arena = scratch;
+  astr text = emit_stmt(&sg, s, depth);
+  if (sg.hadError) {
+    g->hadError = true;
+    return false;
+  }
+  write_astr(g, text);
+  return true;
+}
+
 static astr emit_cstring(CGen* g, const char* chars, int length) {
-  astr out = astr("\"");
+  // Single allocation: measure the escaped length first so a long literal
+  // costs one buffer instead of one clone per character.
+  isize total = 2;  // opening + closing quote
   for (int i = 0; i < length; i++) {
     unsigned char c = (unsigned char)chars[i];
-    if (c == '"')
-      out = astr_concat(g->arena, out, astr("\\\""));
-    else if (c == '\\')
-      out = astr_concat(g->arena, out, astr("\\\\"));
-    else if (c == '\n')
-      out = astr_concat(g->arena, out, astr("\\n"));
+    if (c == '"' || c == '\\' || c == '\n')
+      total += 2;
     else if (c >= 0x20 && c <= 0x7e)
-      out = astr_concat(g->arena, out, astr_format(g->arena, "%c", c));
+      total += 1;
     else
-      out = astr_concat(g->arena, out, astr_format(g->arena, "\\%03o", c));
+      total += 4;  // \ooo
   }
-  return astr_concat(g->arena, out, astr("\""));
+  char* buf = New(g->arena, char, total, NO_INIT);
+  isize off = 0;
+  buf[off++] = '"';
+  for (int i = 0; i < length; i++) {
+    unsigned char c = (unsigned char)chars[i];
+    if (c == '"') {
+      buf[off++] = '\\';
+      buf[off++] = '"';
+    } else if (c == '\\') {
+      buf[off++] = '\\';
+      buf[off++] = '\\';
+    } else if (c == '\n') {
+      buf[off++] = '\\';
+      buf[off++] = 'n';
+    } else if (c >= 0x20 && c <= 0x7e) {
+      buf[off++] = (char)c;
+    } else {
+      buf[off++] = '\\';
+      buf[off++] = (char)('0' + ((c >> 6) & 7));
+      buf[off++] = (char)('0' + ((c >> 3) & 7));
+      buf[off++] = (char)('0' + (c & 7));
+    }
+  }
+  buf[off++] = '"';
+  return (astr){buf, total};
 }
 
 static astr emit_value(CGen* g, Value v) {
@@ -1292,9 +1509,10 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth);
 static astr emit_block_body(CGen* g, RStmtList* statements, int depth) {
   astr out = astr("{\n");
   AstrParts* parts = New(g->arena, AstrParts, 1);
+  Reserve(g->arena, parts, statements->len * 2 + 3);
   push_part(g, parts, out);
   for (isize i = 0; i < statements->len; i++) {
-    astr one = emit_stmt(g, statements->data[i], depth + 1);
+    astr one = emit_stmt_kept(g, statements->data[i], depth + 1);
     if (g->hadError)
       return (astr){0};
     push_part(g, parts, one);
@@ -1355,9 +1573,10 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
     of(RBlock, statements) {
       RStmtList* body = *statements;
       AstrParts* parts = New(g->arena, AstrParts, 1);
+      Reserve(g->arena, parts, body->len * 2 + 3);
       push_part(g, parts, astr_concat(g->arena, ind, astr("{\n")));
       for (isize i = 0; i < body->len; i++) {
-        astr one = emit_stmt(g, body->data[i], depth + 1);
+        astr one = emit_stmt_kept(g, body->data[i], depth + 1);
         if (g->hadError)
           return (astr){0};
         push_part(g, parts, one);
@@ -1495,9 +1714,10 @@ static astr emit_stmt(CGen* g, RStmt* s, int depth) {
     of(RWhile, condition, body, pre) {
       RStmtList* preStmts = *pre;
       AstrParts* parts = New(g->arena, AstrParts, 1);
+      Reserve(g->arena, parts, preStmts->len * 2 + 10);
       push_part(g, parts, astr_concat(g->arena, ind, astr("for (;;) {\n")));
       for (isize i = 0; i < preStmts->len; i++) {
-        push_part(g, parts, emit_stmt(g, preStmts->data[i], depth + 1));
+        push_part(g, parts, emit_stmt_kept(g, preStmts->data[i], depth + 1));
         if (g->hadError)
           return (astr){0};
         push_part(g, parts, astr("\n"));
@@ -1533,6 +1753,9 @@ typedef Slice(CgenFun) CgenFunList;
 
 static void collect_funs_stmt(CGen* g, RStmt* s, CgenFunList* out);
 static void collect_funs_list(CGen* g, RStmtList* stmts, CgenFunList* out) {
+  // No Reserve here: function counts are typically tiny, and reserving
+  // stmts->len would commit tens of MB for programs with no functions at
+  // all. Geometric growth garbage stays proportional to actual funs.
   for (isize i = 0; i < stmts->len; i++)
     collect_funs_stmt(g, stmts->data[i], out);
 }
@@ -1578,44 +1801,44 @@ static void collect_funs_stmt(CGen* g, RStmt* s, CgenFunList* out) {
   }
 }
 
-static astr emit_function(CGen* g, CgenFun* f) {
-  astr code = astr_format(
-      g->arena, "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine) {\n", f->uid);
-  code = astr_concat(g->arena, code,
-                     astr_format(g->arena, "  if (argCount != %d) lox_arity(callLine, %d, argCount);\n",
-                                 (int)f->params->len, (int)f->params->len));
+// Write one collected function as a file-scope C function, streaming its
+// body statement-by-statement: a scratch scope per statement keeps all
+// transients off the long-lived arena, so a huge function costs O(1) extra
+// RSS.
+static void emit_function(CGen* g, CgenFun* f) {
+  write_astr(g, astr_format(
+                   g->arena, "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine) {\n", f->uid));
+  write_astr(g, astr_format(g->arena, "  if (argCount != %d) lox_arity(callLine, %d, argCount);\n",
+                            (int)f->params->len, (int)f->params->len));
   for (isize i = 0; i < f->params->len; i++) {
     CgenParam* p = &f->params->data[i];
     Token tok = {p->name.type, p->name.start, p->name.length, p->name.line};
     if (uid_is_boxed(g, p->uid)) {
-      code = astr_concat(g->arena, code, astr("  LoxCell* "));
-      code = astr_concat(g->arena, code, emit_name(g, tok, p->uid));
-      code = astr_concat(g->arena, code, astr_format(g->arena, " = lox_newcell(args[%d]);\n", (int)i));
+      write_str(g, "  LoxCell* ");
+      write_astr(g, emit_name(g, tok, p->uid));
+      write_astr(g, astr_format(g->arena, " = lox_newcell(args[%d]);\n", (int)i));
     } else {
-      code = astr_concat(g->arena, code, astr("  Value "));
-      code = astr_concat(g->arena, code, emit_name(g, tok, p->uid));
-      code = astr_concat(g->arena, code, astr_format(g->arena, " = args[%d];\n", (int)i));
+      write_str(g, "  Value ");
+      write_astr(g, emit_name(g, tok, p->uid));
+      write_astr(g, astr_format(g->arena, " = args[%d];\n", (int)i));
     }
+    if (g->hadError)
+      return;
   }
   g->emitFunc = f->funcId;
-  AstrParts* parts = New(g->arena, AstrParts, 1);
-  push_part(g, parts, code);
   for (isize i = 0; i < f->body->len; i++) {
-    astr one = emit_stmt(g, f->body->data[i], 1);
-    if (g->hadError)
-      return (astr){0};
-    push_part(g, parts, one);
-    push_part(g, parts, astr("\n"));
+    if (!emit_stmt_stream(g, f->body->data[i], 1))
+      return;
+    write_str(g, "\n");
   }
   g->emitFunc = 0;
-  code = join_parts(g, parts);
-  return astr_concat(g->arena, code, astr("  return NIL_VAL;\n}\n"));
+  write_str(g, "  return NIL_VAL;\n}\n");
 }
 
-CgenResult cgen_compile(Arena* arena, StmtList* prog) {
-  CgenResult fail = {{0}, false};
+bool cgen_write_c(FILE* out, Arena* arena, StmtList* prog) {
   CGen g = {0};
   g.arena = arena;
+  g.out = out;
   g.uidFunc = New(arena, IntList, 1);
   g.uidGlobal = New(arena, BoolList, 1);
   g.uidCaptured = New(arena, BoolList, 1);
@@ -1627,7 +1850,21 @@ CgenResult cgen_compile(Arena* arena, StmtList* prog) {
   for (isize i = 0; i < prog->len; i++)
     check_stmt(&g, prog->data[i], false);
   if (g.hadError)
-    return fail;
+    return false;
+
+  // Exact pre-count: every Var/Function/param binds one uid, every
+  // Variable/Assign records one use. Reserving up front keeps all six
+  // tables' backings at the tip (zero relocation garbage); lowered temps
+  // may still grow geometrically past the reserve, bounded and rare.
+  UidCounts uc = {0, 0};
+  for (isize i = 0; i < prog->len; i++)
+    count_stmt_uids(&uc, prog->data[i]);
+  Reserve(arena, g.uidFunc, uc.decls + 1);
+  Reserve(arena, g.uidGlobal, uc.decls + 1);
+  Reserve(arena, g.uidCaptured, uc.decls + 1);
+  Reserve(arena, g.uidToken, uc.decls + 1);
+  Reserve(arena, g.useUid, uc.refs);
+  Reserve(arena, g.useFunc, uc.refs);
 
   CgenScope* top = new_scope(&g, NULL, 0);
   top->isScriptDirect = true;
@@ -1670,13 +1907,16 @@ CgenResult cgen_compile(Arena* arena, StmtList* prog) {
 
   RStmtList* resolved = New(arena, RStmtList, 1);
   resolve_list(&g, top, prog, resolved);
+  // The AST is dead past resolve-scopes (R nodes borrow only the source text
+  // and heap objects). Its bytes stay in the shared arena and are reclaimed
+  // when the caller resets it for the next input.
   if (g.hadError)
-    return fail;
+    return false;
 
   RStmtList* flat = New(arena, RStmtList, 1);
   lower_body(&g, resolved, flat);
   if (g.hadError)
-    return fail;
+    return false;
 
   g.envs = New(arena, CgenEnvList, 1);
   build_envs(&g, g.envs);
@@ -1685,7 +1925,10 @@ CgenResult cgen_compile(Arena* arena, StmtList* prog) {
   CgenFunList* funs = New(arena, CgenFunList, 1);
   collect_funs_list(&g, flat, funs);
 
-  astr code = astr("#include \"loxrt.h\"\n\n");
+  // Stream everything from here on: per-item scratch scopes build small
+  // chunks that are written out and discarded, so the arena holds IR +
+  // tables only, never the generated text.
+  write_str(&g, "#include \"loxrt.h\"\n\n");
   // Script globals (script-direct uids with declarations).
   for (int uid = 1; uid <= g.uid; uid++) {
     if (!uid_is_global(&g, uid))
@@ -1702,56 +1945,71 @@ CgenResult cgen_compile(Arena* arena, StmtList* prog) {
         continue;
     }
     Token tok = g.uidToken->data[uid - 1];
-    code = astr_concat(arena, code, astr("static Value "));
-    code = astr_concat(arena, code, emit_name(&g, tok, uid));
-    code = astr_concat(arena, code, astr(";\nstatic bool "));
-    code = astr_concat(arena, code, emit_dname(&g, tok, uid));
-    code = astr_concat(arena, code, astr(";\n"));
+    Arena scratch[] = {*g.arena};
+    CGen sg = g;
+    sg.arena = scratch;
+    write_str(&sg, "static Value ");
+    write_astr(&sg, emit_name(&sg, tok, uid));
+    write_str(&sg, ";\nstatic bool ");
+    write_astr(&sg, emit_dname(&sg, tok, uid));
+    write_str(&sg, ";\n");
+    if (sg.hadError) {
+      g.hadError = true;
+      return false;
+    }
   }
-  code = astr_concat(arena, code, astr("\n"));
+  write_str(&g, "\n");
   for (isize i = 0; i < funs->len; i++) {
-    code = astr_concat(
-        arena, code,
-        astr_format(arena,
-                    "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine);\n",
-                    funs->data[i].uid));
+    Arena scratch[] = {*g.arena};
+    CGen sg = g;
+    sg.arena = scratch;
+    write_astr(&sg, astr_format(
+                      sg.arena,
+                      "static Value lox_fn_%d(ObjCFun* self, Value* args, int argCount, int callLine);\n",
+                      funs->data[i].uid));
   }
-  code = astr_concat(arena, code, astr("\n"));
+  write_str(&g, "\n");
   for (isize i = 0; i < funs->len; i++) {
-    code = astr_concat(arena, code, emit_function(&g, &funs->data[i]));
-    if (g.hadError)
-      return fail;
-    code = astr_concat(arena, code, astr("\n"));
+    Arena scratch[] = {*g.arena};
+    CGen sg = g;
+    sg.arena = scratch;
+    emit_function(&sg, &funs->data[i]);
+    if (sg.hadError) {
+      g.hadError = true;
+      return false;
+    }
+    write_str(&g, "\n");
   }
 
   g.emitFunc = 0;
-  code = astr_concat(arena, code, astr("int main(void) {\n  lox_init();\n"));
+  write_str(&g, "int main(void) {\n  lox_init();\n");
   // Clock singleton into its global before user code runs.
   for (isize i = 0; i < g.useUid->len; i++) {
     if (g.useUid->data[i] == g.clockUid) {
       Token tok = g.uidToken->data[g.clockUid - 1];
-      code = astr_concat(arena, code, astr("  "));
-      code = astr_concat(arena, code, emit_name(&g, tok, g.clockUid));
-      code = astr_concat(arena, code, astr(" = lox_clock();\n  "));
-      code = astr_concat(arena, code, emit_dname(&g, tok, g.clockUid));
-      code = astr_concat(arena, code, astr(" = true;\n"));
+      Arena scratch[] = {*g.arena};
+      CGen sg = g;
+      sg.arena = scratch;
+      write_str(&sg, "  ");
+      write_astr(&sg, emit_name(&sg, tok, g.clockUid));
+      write_str(&sg, " = lox_clock();\n  ");
+      write_astr(&sg, emit_dname(&sg, tok, g.clockUid));
+      write_str(&sg, " = true;\n");
+      if (sg.hadError) {
+        g.hadError = true;
+        return false;
+      }
       break;
     }
   }
-  AstrParts* parts = New(arena, AstrParts, 1);
-  push_part(&g, parts, code);
   for (isize i = 0; i < flat->len; i++) {
-    astr one = emit_stmt(&g, flat->data[i], 1);
-    if (g.hadError)
-      return fail;
-    push_part(&g, parts, one);
-    push_part(&g, parts, astr("\n"));
+    if (!emit_stmt_stream(&g, flat->data[i], 1))
+      return false;
+    write_str(&g, "\n");
   }
-  push_part(&g, parts, astr("  lox_free();\n  return 0;\n}\n"));
-  code = join_parts(&g, parts);
+  write_str(&g, "  lox_free();\n  return 0;\n}\n");
 
-  CgenResult ok = {code, true};
-  return ok;
+  return true;
 }
 
 #endif

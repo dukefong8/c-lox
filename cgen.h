@@ -16,22 +16,27 @@
 //    variables live in heap cells, script globals carry defined-flags)
 //
 //
-// All output trees and the output text are built with arena astr in THIS
-// implementation; the GENERATED C is plain code with loxrt helper calls.
+// All IR is built with arena astr in THIS implementation; the output text is
+// streamed to the caller and the GENERATED C is plain code with loxrt helper
+// calls.
 
 #include <stdbool.h>
+#include <stdio.h>
 
-#include <arena.h>
+#include "mmap_arena.h"
 
 #include "parser.h"
 
-typedef struct {
-  astr code;
-  bool ok;
-} CgenResult;
-
-// Compile a parsed program to C source text. Prints "[line N] Error: ..."
-// and returns ok=false on unsupported constructs or undefined variables.
-CgenResult cgen_compile(Arena* arena, StmtList* prog);
+// Compile a parsed program to C source text, streaming it to `out`
+// incrementally (no retained output buffer) so peak RSS stays proportional
+// to the IR, not to the generated text. Prints "[line N] Error: ..." and
+// returns false on unsupported constructs or compile errors. All checking
+// (check-core, resolve-scopes, lower-logical) completes before the first
+// byte is written, so a failed check/resolve/lower writes nothing.
+//
+// Lifetime: `prog`, the source text, and all generated IR live in `arena`.
+// The caller resets the arena before the next input and releases it when
+// done; this function neither resets nor releases it.
+bool cgen_write_c(FILE* out, Arena* arena, StmtList* prog);
 
 #endif
